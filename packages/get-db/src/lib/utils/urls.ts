@@ -6,7 +6,7 @@ export const CLAIMABLE_POSTGRES_URLS = {
 		`${HOST}/db?uuid=${dbId}${
 			referrer ? `&ref=${encodeURIComponent(referrer)}` : ""
 		}`,
-	CLAIM_DATABASE: (dbId: string) => `${HOST}/database/${dbId}`,
+	CLAIM_DATABASE: (dbId: string) => `${HOST}/claim/${dbId}`,
 	CREATE_DATABASE_POST: (dbId: string, referrer?: string) =>
 		`${HOST}/api/v1/database/${dbId}${
 			referrer ? `?referrer=${encodeURIComponent(referrer)}` : ""
