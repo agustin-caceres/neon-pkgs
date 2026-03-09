@@ -73,7 +73,7 @@ describe("instantPostgres", () => {
 	test("generates valid claim URL with UUID", async () => {
 		const result = await instantPostgres({ referrer: "test-referrer" });
 
-		expect(result.claimUrl).toMatch(/^https:\/\/pg\.new\/database\//);
+		expect(result.claimUrl).toMatch(/^https:\/\/neon\.new\/database\//);
 		// Check that URL contains a valid UUID pattern
 		expect(result.claimUrl).toMatch(
 			/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/,
@@ -102,7 +102,7 @@ describe("instantPostgres", () => {
 
 		expect(createClaimableDatabase).toHaveBeenCalledWith({
 			dbId: expect.any(String),
-			referrer: "npm:get-db|test-referrer",
+			referrer: "npm:neon-new|test-referrer",
 			settings: { logicalReplication: false },
 		});
 		expect(writeToEnv).toHaveBeenCalledWith(
@@ -161,7 +161,7 @@ describe("instantPostgres", () => {
 
 		expect(createClaimableDatabase).toHaveBeenCalledWith({
 			dbId: expect.any(String),
-			referrer: `npm:get-db|${customReferrer}`,
+			referrer: `npm:neon-new|${customReferrer}`,
 			settings: { logicalReplication: false },
 		});
 	});
@@ -207,7 +207,7 @@ describe("instantPostgres", () => {
 		);
 		expect(createClaimableDatabase).toHaveBeenCalledWith({
 			dbId: expect.any(String),
-			referrer: "npm:get-db|custom-tool",
+			referrer: "npm:neon-new|custom-tool",
 			settings: { logicalReplication: false },
 		});
 	});
@@ -352,7 +352,7 @@ describe("instantPostgres", () => {
 
 		expect(createClaimableDatabase).toHaveBeenCalledWith({
 			dbId: expect.any(String),
-			referrer: "npm:get-db|test-referrer",
+			referrer: "npm:neon-new|test-referrer",
 			settings: { logicalReplication: false },
 		});
 	});
@@ -365,7 +365,7 @@ describe("instantPostgres", () => {
 
 		expect(createClaimableDatabase).toHaveBeenCalledWith({
 			dbId: expect.any(String),
-			referrer: "npm:get-db|test-referrer",
+			referrer: "npm:neon-new|test-referrer",
 			settings: { logicalReplication: true },
 		});
 	});
@@ -378,7 +378,7 @@ describe("instantPostgres", () => {
 
 		expect(createClaimableDatabase).toHaveBeenCalledWith({
 			dbId: expect.any(String),
-			referrer: "npm:get-db|test-referrer",
+			referrer: "npm:neon-new|test-referrer",
 			settings: { logicalReplication: false },
 		});
 	});
@@ -396,7 +396,7 @@ describe("instantPostgres", () => {
 
 		expect(createClaimableDatabase).toHaveBeenCalledWith({
 			dbId: expect.any(String),
-			referrer: "npm:get-db|custom-tool",
+			referrer: "npm:neon-new|custom-tool",
 			settings: { logicalReplication: true },
 		});
 		expect(writeToEnv).toHaveBeenCalledWith(

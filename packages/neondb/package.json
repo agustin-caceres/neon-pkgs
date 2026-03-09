@@ -1,7 +1,7 @@
 {
 	"name": "neondb",
 	"version": "0.13.0",
-	"description": "[DEPRECATED] This package has been renamed to 'get-db'. Please use 'get-db' instead.",
+	"description": "[DEPRECATED] This package has been renamed to 'neon-new'. Please use 'neon-new' instead.",
 	"keywords": [
 		"neon",
 		"database",
@@ -11,7 +11,7 @@
 	],
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/neondatabase/neondb-cli.git"
+		"url": "git+https://github.com/neondatabase/neon-pkgs.git"
 	},
 	"license": "Apache-2.0",
 	"author": {
@@ -20,10 +20,15 @@
 	},
 	"type": "module",
 	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
 	"bin": {
 		"neondb": "dist/cli.js"
 	},
 	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"types": "./dist/index.d.ts"
+		},
 		"./sdk": {
 			"import": "./dist/lib/index.js",
 			"types": "./dist/lib/index.d.ts"
@@ -59,7 +64,7 @@
 		"provenance": false
 	},
 	"dependencies": {
-		"get-db": "workspace:*"
+		"neon-new": "workspace:*"
 	},
-	"deprecated": "This package has been renamed to 'get-db'. Please update your dependencies."
+	"deprecated": "This package has been renamed to 'neon-new'. Please update your dependencies."
 }

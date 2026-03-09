@@ -1,11 +1,11 @@
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
-	name: "neondb",
+	name: "vite-plugin-neon-new",
 	bundle: false,
 	clean: true,
 	dts: true,
-	entry: ["src/index.ts", "src/**/*.ts", "!src/**/*.test.*"],
+	entry: ["src/**/*.ts", "!src/**/*.test.*"],
 	format: "esm",
 	outDir: "dist",
 	treeshake: true,
