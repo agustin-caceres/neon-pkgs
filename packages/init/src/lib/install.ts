@@ -1,4 +1,6 @@
-import { confirm, isCancel, log, spinner } from "@clack/prompts";
+import { log, spinner } from "@clack/prompts";
+import { execa } from "execa";
+import { getAddMcpAgentId } from "./agents.js";
 import { createApiKeyFromNeonctl, ensureNeonctlAuth } from "./auth.js";
 import {
 	configureExtension,
@@ -6,93 +8,46 @@ import {
 	usesExtension,
 	waitForExtensionInstalled,
 } from "./extension.js";
-import { getMCPConfig, writeMCPConfig } from "./mcp-config.js";
 import type { Editor, InstallStatus } from "./types.js";
 
-/**
- * Checks if an editor needs MCP configuration
- * Returns true if configuration is needed, false otherwise
- */
-async function shouldConfigureMCP(
-	homeDir: string,
-	workspaceDir: string,
-	editor: Editor,
-): Promise<boolean> {
-	const { config } = getMCPConfig(homeDir, workspaceDir, editor);
-
-	// Check if already configured
-	const serverKey = editor === "VS Code" ? config.servers : config.mcpServers;
-	const alreadyConfigured = Boolean(serverKey?.Neon);
-
-	if (alreadyConfigured) {
-		const response = await confirm({
-			message: `Neon MCP Server is already configured for ${editor}. Would you like to reconfigure it? (Y/n)`,
-			initialValue: true,
-		});
-
-		if (isCancel(response)) {
-			return false;
-		}
-
-		const shouldReconfigure = response as boolean;
-
-		if (!shouldReconfigure) {
-			log.info(
-				`Keeping existing MCP server configuration for ${editor}.`,
-			);
-			return false;
-		}
-	}
-
-	return true;
-}
+const NEON_MCP_SERVER_URL = "https://mcp.neon.tech/mcp";
 
 /**
- * Installs Neon's MCP Server for specific editors
+ * Installs Neon MCP Server for a single editor via the add-mcp CLI.
+ * Uses API key authentication via the Authorization header.
  */
-async function installMCPServerForEditor(
-	homeDir: string,
-	workspaceDir: string,
+async function installMCPServerViaAddMcp(
 	editor: Editor,
 	apiKey: string,
-): Promise<InstallStatus> {
-	const { config, configPath } = getMCPConfig(homeDir, workspaceDir, editor);
+): Promise<void> {
+	const agentId = getAddMcpAgentId(editor);
 
-	// Configure Neon MCP Server
-	// Using remote MCP server with API key authentication
-	// Ref: https://neon.com/docs/ai/neon-mcp-server#api-key-based-authentication
-	const neonServerConfig = {
-		type: "http",
-		url: "https://mcp.neon.tech/mcp",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
+	await execa(
+		"npx",
+		[
+			"-y",
+			"add-mcp",
+			NEON_MCP_SERVER_URL,
+			"--header",
+			`Authorization: Bearer ${apiKey}`,
+			"-g",
+			"-n",
+			"Neon",
+			"-y",
+			"-a",
+			agentId,
+		],
+		{
+			stdio: "pipe",
+			timeout: 60000,
 		},
-	};
-
-	// Claude CLI uses "mcpServers" key
-	if (!config.mcpServers) {
-		config.mcpServers = {};
-	}
-	config.mcpServers.Neon = neonServerConfig;
-
-	// Write configuration
-	try {
-		writeMCPConfig(configPath, config);
-		return "success";
-	} catch (error) {
-		log.error(
-			`Failed to write configuration for ${editor}: ${error instanceof Error ? error.message : "Unknown error"}`,
-		);
-		return "failed";
-	}
+	);
 }
 
 /**
  * Installs Neon's Local Connect extension or MCP Server for specific editors
  */
 export async function installNeon(
-	homeDir: string,
-	workspaceDir: string,
 	selectedEditors: Editor[],
 ): Promise<Map<Editor, InstallStatus>> {
 	const results = new Map<Editor, InstallStatus>();
@@ -100,30 +55,7 @@ export async function installNeon(
 	const extensionEditors = selectedEditors.filter(usesExtension);
 	const mcpEditors = selectedEditors.filter((e) => !usesExtension(e));
 
-	// Check which MCP editors need configuration
-	const mcpEditorsToConfigureMap = new Map<Editor, boolean>();
-	for (const editor of mcpEditors) {
-		const needsConfig = await shouldConfigureMCP(
-			homeDir,
-			workspaceDir,
-			editor,
-		);
-		mcpEditorsToConfigureMap.set(editor, needsConfig);
-
-		if (!needsConfig) {
-			results.set(editor, "success");
-		}
-	}
-
-	const mcpToConfigure = mcpEditors.filter(
-		(editor) => mcpEditorsToConfigureMap.get(editor) === true,
-	);
-
-	// Extension editors always get processed (silent installation)
-	const extensionsToConfigure = extensionEditors;
-
-	// If nothing needs configuration, return early
-	if (extensionsToConfigure.length === 0 && mcpToConfigure.length === 0) {
+	if (extensionEditors.length === 0 && mcpEditors.length === 0) {
 		return results;
 	}
 
@@ -134,8 +66,7 @@ export async function installNeon(
 
 	if (!authSuccess) {
 		authSpinner.stop("Authentication failed");
-		// Mark all editors that need configuration as failed
-		for (const editor of [...extensionsToConfigure, ...mcpToConfigure]) {
+		for (const editor of selectedEditors) {
 			results.set(editor, "failed");
 		}
 		return results;
@@ -151,15 +82,13 @@ export async function installNeon(
 		log.info(
 			"You can manually create one at: https://console.neon.tech/app/settings/api-keys",
 		);
-		// Mark all editors that need configuration as failed
-		for (const editor of [...extensionsToConfigure, ...mcpToConfigure]) {
+		for (const editor of selectedEditors) {
 			results.set(editor, "failed");
 		}
 		return results;
 	}
 
-	// Install and configure extension for Cursor/VS Code (silently)
-	for (const editor of extensionsToConfigure) {
+	for (const editor of extensionEditors) {
 		const installSuccess = await installExtension(editor);
 
 		if (!installSuccess) {
@@ -185,14 +114,37 @@ export async function installNeon(
 		}
 	}
 
-	for (const editor of mcpToConfigure) {
-		const status = await installMCPServerForEditor(
-			homeDir,
-			workspaceDir,
-			editor,
-			apiKey,
+	if (mcpEditors.length > 0) {
+		const mcpSpinner = spinner();
+		mcpSpinner.start("Installing and configuring Neon MCP Server...");
+
+		let mcpSuccessCount = 0;
+		for (const editor of mcpEditors) {
+			try {
+				await installMCPServerViaAddMcp(editor, apiKey);
+				results.set(editor, "success");
+				mcpSuccessCount++;
+			} catch (err) {
+				results.set(editor, "failed");
+				if (
+					err &&
+					typeof err === "object" &&
+					"stderr" in err &&
+					err.stderr
+				) {
+					log.error(
+						String(err.stderr).trim() ||
+							"failed to install MCP server via add-mcp",
+					);
+				}
+			}
+		}
+
+		mcpSpinner.stop(
+			mcpSuccessCount > 0
+				? "Neon MCP Server configuration complete ✓"
+				: "Failed to configure Neon MCP Server",
 		);
-		results.set(editor, status);
 	}
 
 	return results;
