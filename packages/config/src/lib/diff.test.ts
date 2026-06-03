@@ -1,0 +1,64 @@
+import { describe, expect, test } from "vitest";
+import { diffConfig, type RemoteState } from "./diff.js";
+
+describe("diffConfig", () => {
+	const remote: RemoteState = {
+		projectId: "proj",
+		branch: {
+			id: "br-main",
+			name: "main",
+			isDefault: true,
+			protected: false,
+		},
+		endpoint: {
+			id: "ep",
+			branchId: "br-main",
+			type: "read_write" as const,
+			autoscalingLimitMinCu: 0.25,
+			autoscalingLimitMaxCu: 1,
+			suspendTimeout: "5m",
+		},
+		services: {
+			databaseName: "neondb",
+			authEnabled: false,
+			dataApiEnabled: false,
+		},
+	};
+
+	test("plans service enables", () => {
+		const diff = diffConfig(
+			{ authEnabled: true, dataApiEnabled: true },
+			remote,
+			{ updateExisting: false },
+		);
+		expect(diff.plan.map((p) => p.kind)).toEqual([
+			"enable-auth",
+			"enable-data-api",
+		]);
+	});
+
+	test("reports compute drift unless updateExisting is set", () => {
+		const diff = diffConfig(
+			{
+				authEnabled: false,
+				dataApiEnabled: false,
+				postgres: { computeSettings: { autoscalingLimitMaxCu: 2 } },
+			},
+			remote,
+			{ updateExisting: false },
+		);
+		expect(diff.conflicts[0]).toMatchObject({ field: "computeSettings" });
+	});
+
+	test("plans mutable branch updates with updateExisting", () => {
+		const diff = diffConfig(
+			{ authEnabled: false, dataApiEnabled: false, protected: true },
+			remote,
+			{ updateExisting: true },
+		);
+		expect(diff.plan[0]).toMatchObject({
+			kind: "update-branch-protected",
+			branchId: "br-main",
+		});
+	});
+});
