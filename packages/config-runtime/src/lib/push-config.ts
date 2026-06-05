@@ -1,19 +1,22 @@
-import { createNeonApiFromOptions } from "./auth.js";
-import { resolveConfig } from "./define-config.js";
 import {
+	type AppliedChange,
+	type Config,
+	createNeonApiFromOptions,
 	diffConfig,
-	type PlanStep,
-	type RemoteServiceState,
-	type RemoteState,
-} from "./diff.js";
-import {
 	ErrorCode,
+	type NeonApi,
+	type NeonBranchSnapshot,
+	type PlanStep,
 	PlatformError,
 	PushAbortedError,
 	PushConflictError,
-} from "./errors.js";
-import type { NeonApi, NeonBranchSnapshot } from "./neon-api.js";
-import type { AppliedChange, Config, PushResult } from "./types.js";
+	type PushResult,
+	type RemotePreviewState,
+	type RemoteServiceState,
+	type RemoteState,
+	resolveConfig,
+} from "@neondatabase/config";
+import { buildFunctionBundle } from "./function-bundle.js";
 
 export interface PushConfigOptions {
 	/**
@@ -156,6 +159,15 @@ export async function pushConfig(
 		),
 		services,
 	};
+	// Only fetch Preview state when the policy actually uses it — keeps pushes that don't
+	// touch functions/buckets/aiGateway at the same number of API calls as before.
+	if (resolved.preview) {
+		remote.preview = await resolvePreviewState({
+			api,
+			projectId: remoteProject.id,
+			branchId: branch.id,
+		});
+	}
 
 	// Always compute the plan with `updateExisting: true` so we can see what *would* be
 	// overridden. The decision of whether to apply / prompt / fail is gated below using
@@ -293,6 +305,48 @@ function synthesizeAppliedChange(step: PlanStep): AppliedChange {
 					databaseName: step.databaseName,
 				},
 			};
+		case "create-bucket":
+			return {
+				kind: "service",
+				action: "create",
+				identifier: `bucket:${step.bucketName}`,
+				details: {
+					branchName: step.branchName,
+					bucketName: step.bucketName,
+					accessLevel: step.accessLevel,
+				},
+			};
+		case "create-function":
+			return {
+				kind: "service",
+				action: "create",
+				identifier: `function:${step.fn.slug}`,
+				details: {
+					branchName: step.branchName,
+					slug: step.fn.slug,
+					name: step.fn.name,
+				},
+			};
+		case "deploy-function":
+			return {
+				kind: "service",
+				action: "update",
+				identifier: `function:${step.fn.slug}`,
+				details: {
+					branchName: step.branchName,
+					slug: step.fn.slug,
+					source: step.fn.source,
+					runtime: step.fn.runtime,
+					memoryMib: step.fn.memoryMib,
+				},
+			};
+		case "enable-ai-gateway":
+			return {
+				kind: "service",
+				action: "create",
+				identifier: "aiGateway",
+				details: { branchName: step.branchName },
+			};
 	}
 }
 
@@ -357,6 +411,25 @@ async function resolveServiceState(args: {
 		authEnabled: auth !== null,
 		dataApiEnabled: dataApi !== null,
 	};
+}
+
+/**
+ * Pre-fetch the current state of branch-scoped Preview features (buckets, functions, AI
+ * Gateway) so the diff can be computed additively. Only called when the policy has a
+ * `preview` block.
+ */
+async function resolvePreviewState(args: {
+	api: NeonApi;
+	projectId: string;
+	branchId: string;
+}): Promise<RemotePreviewState> {
+	const { api, projectId, branchId } = args;
+	const [buckets, functions, aiGatewayEnabled] = await Promise.all([
+		api.listBranchBuckets(projectId, branchId),
+		api.listBranchFunctions(projectId, branchId),
+		api.getAiGatewayEnabled(projectId, branchId),
+	]);
+	return { buckets, functions, aiGatewayEnabled };
 }
 
 /**
@@ -470,6 +543,76 @@ async function applyStep(
 					branchName: step.branchName,
 					databaseName: step.databaseName,
 				},
+			};
+		}
+		case "create-bucket": {
+			await ctx.api.createBranchBucket(
+				ctx.remoteProjectId,
+				step.branchId,
+				{ name: step.bucketName, accessLevel: step.accessLevel },
+			);
+			return {
+				kind: "service",
+				action: "create",
+				identifier: `bucket:${step.bucketName}`,
+				details: {
+					branchName: step.branchName,
+					bucketName: step.bucketName,
+					accessLevel: step.accessLevel,
+				},
+			};
+		}
+		case "create-function": {
+			await ctx.api.createBranchFunction(
+				ctx.remoteProjectId,
+				step.branchId,
+				{ slug: step.fn.slug, name: step.fn.name },
+			);
+			return {
+				kind: "service",
+				action: "create",
+				identifier: `function:${step.fn.slug}`,
+				details: {
+					branchName: step.branchName,
+					slug: step.fn.slug,
+					name: step.fn.name,
+				},
+			};
+		}
+		case "deploy-function": {
+			const bundle = await buildFunctionBundle(step.fn);
+			const deployment = await ctx.api.deployBranchFunction(
+				ctx.remoteProjectId,
+				step.branchId,
+				step.fn.slug,
+				{
+					bundle,
+					runtime: step.fn.runtime,
+					memoryMib: step.fn.memoryMib,
+					environment: step.fn.env,
+				},
+			);
+			return {
+				kind: "service",
+				action: "update",
+				identifier: `function:${step.fn.slug}`,
+				details: {
+					branchName: step.branchName,
+					slug: step.fn.slug,
+					source: step.fn.source,
+					runtime: step.fn.runtime,
+					memoryMib: step.fn.memoryMib,
+					deploymentId: deployment.id,
+				},
+			};
+		}
+		case "enable-ai-gateway": {
+			await ctx.api.enableAiGateway(ctx.remoteProjectId, step.branchId);
+			return {
+				kind: "service",
+				action: "create",
+				identifier: "aiGateway",
+				details: { branchName: step.branchName },
 			};
 		}
 	}

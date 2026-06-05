@@ -1,12 +1,17 @@
-import { createNeonApiFromOptions } from "./auth.js";
-import { ErrorCode, PlatformError } from "./errors.js";
-import type {
-	NeonApi,
-	NeonBranchSnapshot,
-	NeonEndpointSnapshot,
-	NeonProjectSnapshot,
-} from "./neon-api.js";
-import type { BranchConfig, ComputeSettings } from "./types.js";
+import {
+	type BranchConfig,
+	type BucketConfig,
+	type ComputeSettings,
+	createNeonApiFromOptions,
+	ErrorCode,
+	type NeonApi,
+	type NeonBranchSnapshot,
+	type NeonBucketSnapshot,
+	type NeonEndpointSnapshot,
+	type NeonFunctionSnapshot,
+	type NeonProjectSnapshot,
+	PlatformError,
+} from "@neondatabase/config";
 
 export interface PullConfigOptions {
 	/** Neon project id (`<project>`). Required — the API addresses branches by project. */
@@ -17,6 +22,18 @@ export interface PullConfigOptions {
 	apiKey?: string;
 	/** Inject a custom NeonApi adapter (primarily for tests). */
 	api?: NeonApi;
+}
+
+/**
+ * Live Preview-feature state read back from a branch. Surfaced alongside `config` rather
+ * than inside it because functions cannot round-trip: the remote only knows the deployed
+ * bundle, not the local `source` path a {@link FunctionConfig} requires, so a pulled
+ * function is reported as `{ slug, name }` (no `source`).
+ */
+export interface PulledPreview {
+	buckets: BucketConfig[];
+	functions: Array<{ slug: string; name: string }>;
+	aiGatewayEnabled: boolean;
 }
 
 export interface PulledBranchConfig {
@@ -36,6 +53,11 @@ export interface PulledBranchConfig {
 		expiresAt?: string;
 	};
 	config: BranchConfig;
+	/**
+	 * Live Preview-feature state, when the branch has any buckets/functions or an enabled
+	 * AI Gateway. Omitted entirely when there is nothing to report.
+	 */
+	preview?: PulledPreview;
 }
 
 export async function pullConfig(
@@ -52,7 +74,16 @@ export async function pullConfig(
 	const endpoint = endpoints.find(
 		(ep) => ep.type === "read_write" && ep.branchId === branch.id,
 	);
-	return buildPulledBranchConfig(project, branch, branches, endpoint);
+	const [buckets, functions, aiGatewayEnabled] = await Promise.all([
+		api.listBranchBuckets(projectId, branch.id),
+		api.listBranchFunctions(projectId, branch.id),
+		api.getAiGatewayEnabled(projectId, branch.id),
+	]);
+	return buildPulledBranchConfig(project, branch, branches, endpoint, {
+		buckets,
+		functions,
+		aiGatewayEnabled,
+	});
 }
 
 function createApiFromOptions(options: PullConfigOptions): NeonApi {
@@ -66,6 +97,11 @@ export function buildPulledBranchConfig(
 	branch: NeonBranchSnapshot,
 	branches: NeonBranchSnapshot[],
 	endpoint: NeonEndpointSnapshot | undefined,
+	previewState?: {
+		buckets: NeonBucketSnapshot[];
+		functions: NeonFunctionSnapshot[];
+		aiGatewayEnabled: boolean;
+	},
 ): PulledBranchConfig {
 	const parent = branch.parentId
 		? branches.find((b) => b.id === branch.parentId)
@@ -78,7 +114,7 @@ export function buildPulledBranchConfig(
 		const compute = endpointToComputeSettings(endpoint, project);
 		if (compute) config.postgres = { computeSettings: compute };
 	}
-	return {
+	const result: PulledBranchConfig = {
 		project: {
 			id: project.id,
 			name: project.name,
@@ -95,6 +131,38 @@ export function buildPulledBranchConfig(
 			...(branch.expiresAt ? { expiresAt: branch.expiresAt } : {}),
 		},
 		config,
+	};
+	const preview = previewState ? buildPulledPreview(previewState) : undefined;
+	if (preview) result.preview = preview;
+	return result;
+}
+
+/**
+ * Reverse-engineer the {@link PulledPreview} from remote snapshots. Returns `undefined` when
+ * the branch has no Preview features so the field can be omitted entirely.
+ */
+function buildPulledPreview(state: {
+	buckets: NeonBucketSnapshot[];
+	functions: NeonFunctionSnapshot[];
+	aiGatewayEnabled: boolean;
+}): PulledPreview | undefined {
+	if (
+		state.buckets.length === 0 &&
+		state.functions.length === 0 &&
+		!state.aiGatewayEnabled
+	) {
+		return undefined;
+	}
+	return {
+		buckets: state.buckets.map((b) => ({
+			name: b.name,
+			access: b.accessLevel,
+		})),
+		functions: state.functions.map((f) => ({
+			slug: f.slug,
+			name: f.name,
+		})),
+		aiGatewayEnabled: state.aiGatewayEnabled,
 	};
 }
 
