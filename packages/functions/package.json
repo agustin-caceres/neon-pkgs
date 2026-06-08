@@ -1,13 +1,13 @@
 {
-	"name": "@neondatabase/config",
-	"version": "0.1.0",
-	"description": "Config-as-Code for the Neon Platform. Define a `neon.ts` policy and inspect/diff/deploy it against the Neon API as plain TypeScript functions.",
+	"name": "@neondatabase/functions",
+	"version": "0.0.0",
+	"description": "Runtime helpers for Neon Functions. Currently provides a `waitUntil` primitive for deferring async work past a response.",
 	"keywords": [
 		"neon",
 		"database",
 		"postgres",
-		"iac",
-		"config-as-code",
+		"functions",
+		"serverless",
 		"platform"
 	],
 	"repository": {
@@ -44,7 +44,6 @@
 		"prepare": "npm run build",
 		"test": "vitest --passWithNoTests",
 		"test:ci": "vitest run --passWithNoTests",
-		"test:e2e": "vitest run --config vitest.e2e.config.ts",
 		"tsc": "tsc"
 	},
 	"devDependencies": {
@@ -54,11 +53,6 @@
 		"tsdown": "catalog:",
 		"typescript": "catalog:",
 		"vitest": "catalog:"
-	},
-	"dependencies": {
-		"@neondatabase/api-client": "^2.7.1",
-		"jiti": "^2.7.0",
-		"zod": "^4.4.3"
 	},
 	"packageManager": "pnpm@10.4.0",
 	"engines": {
