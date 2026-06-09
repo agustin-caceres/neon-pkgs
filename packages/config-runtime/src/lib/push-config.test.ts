@@ -272,7 +272,7 @@ describe("pushConfig", () => {
 				functions: [
 					{
 						name: "Hello World",
-						slug: "hello-world",
+						slug: "fn1",
 						source: fnSource,
 						env: { RESEND_API_KEY: "re_abc" },
 					},
@@ -298,12 +298,12 @@ describe("pushConfig", () => {
 				expect.objectContaining({
 					kind: "service",
 					action: "create",
-					identifier: "function:hello-world",
+					identifier: "function:fn1",
 				}),
 				expect.objectContaining({
 					kind: "service",
 					action: "update",
-					identifier: "function:hello-world",
+					identifier: "function:fn1",
 				}),
 				expect.objectContaining({
 					kind: "service",
@@ -316,7 +316,7 @@ describe("pushConfig", () => {
 		const functions = await api.listBranchFunctions(projectId, "br-main");
 		expect(functions).toEqual([
 			expect.objectContaining({
-				slug: "hello-world",
+				slug: "fn1",
 				activeDeploymentId: 1,
 			}),
 		]);
@@ -328,6 +328,28 @@ describe("pushConfig", () => {
 		).toEqual(["uploads"]);
 	});
 
+	test("only probes the Preview features the policy declares", async () => {
+		const { api, projectId } = seededFake();
+		// Policy declares functions only — no buckets, no aiGateway.
+		const config = defineConfig(() => ({
+			preview: {
+				functions: [
+					{ name: "Hello World", slug: "fn1", source: fnSource },
+				],
+			},
+		}));
+
+		await pushConfig(config, { api, projectId, branchId: "br-main" });
+
+		const methods = api.history.map((h) => h.method);
+		expect(methods).toContain("listBranchFunctions");
+		// AI Gateway / buckets are not in the policy, so they are never read — this is
+		// what keeps `plan`/`apply` from failing on a Preview feature the user didn't ask
+		// for when it's unavailable in the project/region.
+		expect(methods).not.toContain("getAiGatewayEnabled");
+		expect(methods).not.toContain("listBranchBuckets");
+	});
+
 	test("uses an injected bundleFunction instead of the default esbuild bundler", async () => {
 		const { api, projectId } = seededFake();
 		const config = defineConfig(() => ({
@@ -335,7 +357,7 @@ describe("pushConfig", () => {
 				functions: [
 					{
 						name: "Hello World",
-						slug: "hello-world",
+						slug: "fn1",
 						source: fnSource,
 					},
 				],
@@ -355,7 +377,7 @@ describe("pushConfig", () => {
 			},
 		});
 
-		expect(bundled).toEqual(["hello-world"]);
+		expect(bundled).toEqual(["fn1"]);
 		const deploys = api.history.filter(
 			(h) => h.method === "deployBranchFunction",
 		);
@@ -368,16 +390,16 @@ describe("pushConfig", () => {
 		const { api, projectId } = seededFake();
 		api.seedFunction(projectId, "br-main", {
 			id: "fn-existing",
-			slug: "hello-world",
+			slug: "fn1",
 			name: "Hello World",
-			invocationUrl: "https://x/functions/hello-world",
+			invocationUrl: "https://x/functions/fn1",
 		});
 		const config = defineConfig(() => ({
 			preview: {
 				functions: [
 					{
 						name: "Hello World",
-						slug: "hello-world",
+						slug: "fn1",
 						source: fnSource,
 					},
 				],

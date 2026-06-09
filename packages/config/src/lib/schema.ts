@@ -72,13 +72,13 @@ export const postgresConfigSchema = z.strictObject({
 
 /**
  * Branch-unique function slug. Mirrors the Neon Functions API path-segment rule
- * (`platform/internal/platform/functions/name.go`): lowercase DNS label, 1–40 chars.
+ * (`platform/internal/platform/functions/name.go`): 1–20 lowercase letters and digits.
  */
 const functionSlugSchema = z
 	.string()
 	.regex(
-		/^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/,
-		"function slug must be a lowercase DNS label (1-40 chars, letters/digits/hyphens, no leading/trailing hyphen)",
+		/^[a-z0-9]{1,20}$/,
+		"function slug must be 1-20 lowercase letters and digits (no hyphens or other characters)",
 	);
 
 /**
@@ -95,21 +95,15 @@ const functionEnvSchema = z.record(z.string(), z.string());
 const devPortSchema = z.number().int().min(1).max(65535);
 
 /**
- * Local-dev settings for a function (`neon dev` only; never affects deploy). Modeled as a
- * union of two strict shapes so the inferred type *is* the {@link FunctionDevConfig}
- * discriminated union — `portless: true` carries a required `port` (portless needs a concrete
- * port to map its `slug.localhost` name to); otherwise `port` is optional.
+ * Local-dev settings for a function (`neon dev` only; never affects deploy). `port` and
+ * `portless` are independent: when `portless` is true, portless assigns the port itself
+ * (so `port` is ignored); otherwise `port` is bound exactly when set, or a free port is
+ * found when omitted.
  */
-const functionDevConfigSchema = z.union([
-	z.strictObject({
-		portless: z.literal(true),
-		port: devPortSchema,
-	}),
-	z.strictObject({
-		portless: z.literal(false).optional(),
-		port: devPortSchema.optional(),
-	}),
-]);
+const functionDevConfigSchema = z.strictObject({
+	port: devPortSchema.optional(),
+	portless: z.boolean().optional(),
+});
 
 export const functionConfigSchema = z.strictObject({
 	slug: functionSlugSchema,
