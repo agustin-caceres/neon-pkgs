@@ -331,6 +331,54 @@ describe("misePlugin", () => {
 		},
 	);
 
+	it("logs an info and bundles no tools when there is no mise config", async () => {
+		const info = vi
+			.spyOn(console, "info")
+			.mockImplementation(() => undefined);
+		const cwd = await mkdtemp(join(tmpdir(), "neon-mise-nocfg-"));
+
+		// No `tools` option, no mise.toml in cwd, and nothing imports the runtime
+		// — the build must still succeed cleanly, with no outdir required.
+		const result = await build({
+			stdin: { contents: "export {};", resolveDir: cwd },
+			absWorkingDir: cwd,
+			bundle: true,
+			write: false,
+			outfile: "index.mjs",
+			plugins: [misePlugin()],
+		});
+
+		expect(info).toHaveBeenCalledWith(
+			expect.stringMatching(
+				/no mise config found.*no tools will be installed/,
+			),
+		);
+		expect(result.warnings).toEqual([]);
+		expect(result.outputFiles.map((f) => f.path)).toEqual([
+			expect.stringMatching(/index\.mjs$/),
+		]);
+	});
+
+	it("bakes an empty manifest when a custom configFile is missing, so ensureTools() no-ops", async () => {
+		vi.spyOn(console, "info").mockImplementation(() => undefined);
+		const cwd = await mkdtemp(join(tmpdir(), "neon-mise-nocfg-"));
+
+		const result = await build({
+			stdin: { contents: ENTRY, resolveDir: cwd, loader: "ts" },
+			absWorkingDir: cwd,
+			bundle: true,
+			write: false,
+			format: "esm",
+			outfile: "index.mjs",
+			plugins: [misePlugin({ configFile: "my-tools.toml" })],
+		});
+
+		const bundle = result.outputFiles.find((f) =>
+			f.path.endsWith("index.mjs"),
+		);
+		expect(bundle?.text).toMatch(/"tools":\s*\[\]/);
+	});
+
 	it("fails the build with a clear error when a tool cannot be resolved", async () => {
 		stubFetch();
 		const cacheDir = await mkdtemp(join(tmpdir(), "neon-mise-cache-"));

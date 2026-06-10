@@ -5,7 +5,16 @@
  * what's below.
  */
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, rename, rm, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+	access,
+	chmod,
+	copyFile,
+	mkdir,
+	rename,
+	rm,
+	stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,8 +41,8 @@ export interface EnsureToolsOptions {
 }
 
 export interface EnsureToolsResult {
-	/** The directory that was prepended to `PATH`. */
-	binDir: string;
+	/** The directory that was prepended to `PATH`; `null` when the build shipped no tools. */
+	binDir: string | null;
 	tools: BakedTool[];
 }
 
@@ -42,11 +51,14 @@ let memo: Promise<EnsureToolsResult | null> | undefined;
 /**
  * Make the tools shipped by the esbuild plugin available on `PATH`.
  *
- * Copies the current platform's binaries out of the (possibly read-only)
- * bundle directory into a writable folder, marks them executable, and prepends
- * that folder to `process.env.PATH` — after this resolves, `rg`, `jq`, etc.
- * work from any child process. Call it once at module top level so the work
- * happens during instance initialization rather than on the request path.
+ * When the deployed binaries are already executable, this simply prepends the
+ * bundle's own tools folder to `process.env.PATH`. When the deploy pipeline
+ * stripped the executable bits (and the bundle directory is read-only, so they
+ * can't be restored in place), it first copies the current platform's binaries
+ * into a writable folder and marks them executable. Either way, after this
+ * resolves `rg`, `jq`, etc. work from any child process. Call it once at
+ * module top level so the work happens during instance initialization rather
+ * than on the request path.
  *
  * Memoized: concurrent and repeat calls share one install (options of the
  * first call win). Returns `null` when the bundle wasn't built with the
@@ -87,6 +99,11 @@ export async function installTools(
 			`@neondatabase/esbuild-plugin-mise: unsupported manifest version ${String(baked.version)} — this runtime understands version 1.`,
 		);
 	}
+	// The build ran without a mise config (or with an empty [tools] section):
+	// nothing to stage, nothing to put on PATH.
+	if (baked.tools.length === 0) {
+		return { binDir: null, tools: [] };
+	}
 
 	const platform = `${process.platform}-${process.arch}` as Platform;
 	if (!baked.platforms.includes(platform)) {
@@ -107,6 +124,17 @@ export async function installTools(
 		bundleDir = dirname(fileURLToPath(import.meta.url));
 	}
 	const srcDir = join(bundleDir, baked.toolsDir, platform);
+	const env = options.env ?? process.env;
+
+	// Fast path: when the deploy pipeline preserved the executable bits, the
+	// bundled tools folder itself goes on PATH — no copy at all. The staging
+	// fallback below exists for pipelines that strip file modes and mount the
+	// bundle read-only (so the bits can't be restored in place).
+	if (await allExecutable(srcDir, baked.tools)) {
+		prependToPath(srcDir, env);
+		return { binDir: srcDir, tools: baked.tools };
+	}
+
 	const key = createHash("sha256")
 		.update(JSON.stringify({ platform, tools: baked.tools }))
 		.digest("hex")
@@ -117,7 +145,7 @@ export async function installTools(
 		await stage(srcDir, destDir, baked.tools, baked.toolsDir);
 	}
 
-	prependToPath(destDir, options.env ?? process.env);
+	prependToPath(destDir, env);
 	return { binDir: destDir, tools: baked.tools };
 }
 
@@ -154,6 +182,20 @@ async function stage(
 		// Lost the rename race to another process? Their copy is complete — use it.
 		if (await isDirectory(destDir)) return;
 		throw error;
+	}
+}
+
+async function allExecutable(
+	srcDir: string,
+	tools: BakedTool[],
+): Promise<boolean> {
+	try {
+		await Promise.all(
+			tools.map((tool) => access(join(srcDir, tool.bin), constants.X_OK)),
+		);
+		return true;
+	} catch {
+		return false;
 	}
 }
 

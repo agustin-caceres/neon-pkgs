@@ -67,7 +67,15 @@ export function misePlugin(options: MisePluginOptions = {}): Plugin {
 				const promise =
 					prepared ??
 					(async () => {
-						const specs = await resolveToolSpecs(options, cwd);
+						const { specs, skippedReason } = await resolveToolSpecs(
+							options,
+							cwd,
+						);
+						if (skippedReason !== undefined) {
+							console.info(
+								`[@neondatabase/esbuild-plugin-mise] ${skippedReason} — no tools will be installed.`,
+							);
+						}
 						const result = await prepareTools(
 							specs,
 							platforms,
@@ -105,6 +113,11 @@ export function misePlugin(options: MisePluginOptions = {}): Plugin {
 			build.onEnd(async (result) => {
 				if (result.errors.length > 0) return;
 
+				const { files } = await prepare();
+				// A missing mise config resolves to zero tools (logged above): nothing
+				// to emit, nothing to validate.
+				if (files.length === 0) return;
+
 				if (
 					build.initialOptions.write !== false &&
 					build.initialOptions.outdir === undefined &&
@@ -122,7 +135,6 @@ export function misePlugin(options: MisePluginOptions = {}): Plugin {
 					};
 				}
 
-				const { files } = await prepare();
 				const outBase = resolveOutBase(build.initialOptions, cwd);
 
 				if (build.initialOptions.write === false) {

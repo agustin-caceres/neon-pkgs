@@ -37,6 +37,30 @@ describe("installTools", () => {
 		expect(warn).toHaveBeenCalledOnce();
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"puts the bundled tools folder itself on PATH when the binaries are already executable",
+		async () => {
+			const bundleDir = await mkdtemp(
+				join(tmpdir(), "neon-mise-bundle-"),
+			);
+			const toolsDir = join(bundleDir, "tools", platform);
+			await mkdir(toolsDir, { recursive: true });
+			await writeFile(join(toolsDir, "fakebin"), "#!/bin/sh", {
+				mode: 0o755,
+			});
+			const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+
+			const result = await installTools(makeManifest(["fakebin"]), {
+				bundleDir,
+				env,
+			});
+
+			// No copy: PATH points straight at the bundle's own folder.
+			expect(result?.binDir).toBe(toolsDir);
+			expect(env.PATH).toBe(`${toolsDir}${delimiter}/usr/bin`);
+		},
+	);
+
 	it("stages binaries into a writable dir, chmods them, and prepends PATH", async () => {
 		const bundleDir = await makeBundleDir({
 			fakebin: "#!/bin/sh\necho hi",
@@ -78,6 +102,16 @@ describe("installTools", () => {
 		await installTools(manifest, { bundleDir, destDir, env });
 
 		expect(env.PATH).toBe(`${destDir}${delimiter}/usr/bin`);
+	});
+
+	it("no-ops on an empty manifest (build ran without a mise config)", async () => {
+		const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+		const result = await installTools(
+			{ version: 1, toolsDir: "tools", platforms: [], tools: [] },
+			{ env },
+		);
+		expect(result).toEqual({ binDir: null, tools: [] });
+		expect(env.PATH).toBe("/usr/bin");
 	});
 
 	it("rejects manifests with an unknown version (globalThis injection path)", async () => {

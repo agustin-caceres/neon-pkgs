@@ -8,6 +8,16 @@ import type {
 	ToolSpecObject,
 } from "./types.js";
 
+export interface ResolvedSpecs {
+	specs: ResolvedToolSpec[];
+	/**
+	 * Set (with `specs: []`) when no explicit `tools` were given and the mise
+	 * config is absent or has no `[tools]` section — the plugin logs this and
+	 * bundles nothing rather than failing the build.
+	 */
+	skippedReason?: string;
+}
+
 /**
  * Turn the user's tool declarations (plugin options, falling back to the
  * project's mise.toml) into normalized specs. Pure name/catalog resolution —
@@ -16,15 +26,21 @@ import type {
 export async function resolveToolSpecs(
 	options: MisePluginOptions,
 	cwd: string,
-): Promise<ResolvedToolSpec[]> {
-	const tools =
-		options.tools ?? (await readMiseToml(options.configFile, cwd));
+): Promise<ResolvedSpecs> {
+	let tools = options.tools;
+	if (tools === undefined) {
+		const fromConfig = await readMiseToml(options.configFile, cwd);
+		if (typeof fromConfig === "string") {
+			return { specs: [], skippedReason: fromConfig };
+		}
+		tools = fromConfig;
+	}
 	const specs = Object.entries(tools).map(([name, spec]) =>
 		normalizeToolSpec(name, spec),
 	);
 	if (specs.length === 0) {
 		throw new Error(
-			"@neondatabase/esbuild-plugin-mise: no tools declared. Pass `tools` in the plugin options or add a [tools] section to mise.toml.",
+			"@neondatabase/esbuild-plugin-mise: the `tools` option is empty. Declare at least one tool, or omit the option to read mise.toml.",
 		);
 	}
 	const seen = new Map<string, string>();
@@ -37,7 +53,7 @@ export async function resolveToolSpecs(
 		}
 		seen.set(spec.bin, spec.name);
 	}
-	return specs;
+	return { specs };
 }
 
 export function normalizeToolSpec(
@@ -114,10 +130,11 @@ function normalizeVersion(version: string | undefined): string {
 	return v.startsWith("v") ? v.slice(1) : v;
 }
 
+/** Returns the parsed tools, or a human-readable reason when there is nothing to install. */
 async function readMiseToml(
 	configFile: string | undefined,
 	cwd: string,
-): Promise<Record<string, ToolSpec>> {
+): Promise<Record<string, ToolSpec> | string> {
 	const candidates = configFile
 		? [resolve(cwd, configFile)]
 		: [join(cwd, "mise.toml"), join(cwd, ".mise.toml")];
@@ -133,18 +150,16 @@ async function readMiseToml(
 		}
 	}
 	if (text === undefined || path === undefined) {
-		throw new Error(
-			`@neondatabase/esbuild-plugin-mise: no \`tools\` option given and no mise config found (looked for ${candidates.join(", ")}).`,
-		);
+		return `no mise config found (looked for ${candidates.join(", ")})`;
 	}
 
 	const { parse } = await import("smol-toml");
 	const parsed = parse(text) as { tools?: Record<string, unknown> };
 	const tools = parsed.tools;
 	if (tools === undefined || Object.keys(tools).length === 0) {
-		throw new Error(
-			`@neondatabase/esbuild-plugin-mise: ${path} has no [tools] section.`,
-		);
+		// A mise config without [tools] is normal (it may only carry [env] or
+		// [tasks]) — nothing to install, not an error.
+		return `${path} has no [tools] section`;
 	}
 
 	const result: Record<string, ToolSpec> = {};

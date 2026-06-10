@@ -46,7 +46,9 @@ dist/
 
 Deploy `dist/` as a whole — the `tools/` folder must travel with the bundle.
 
-If you omit `tools`, the plugin reads the `[tools]` section of your project's `mise.toml` (`name = "version"` and `name = { version = "..." }` entries). Anything it can't faithfully reproduce — language runtimes like `node`/`python`, version arrays, mise table options like `os` — is rejected with an explanation rather than silently behaving differently from mise: this plugin covers single-binary CLIs, not the full mise registry.
+If you omit `tools`, the plugin reads the `[tools]` section of your project's `mise.toml` / `.mise.toml` (`name = "version"` and `name = { version = "..." }` entries) — or of the file you point it at with `configFile`. Anything it can't faithfully reproduce — language runtimes like `node`/`python`, version arrays, mise table options like `os` — is rejected with an explanation rather than silently behaving differently from mise: this plugin covers single-binary CLIs, not the full mise registry.
+
+If the config file doesn't exist (or has no `[tools]` section), the plugin logs an info message and bundles no tools: the build succeeds, and `ensureTools()` resolves to `{ binDir: null, tools: [] }` at runtime. Adding a `mise.toml` later just works — no build-config change needed.
 
 ### 2. Put the tools on PATH at runtime
 
@@ -63,8 +65,8 @@ execFile("rg", ["--json", "TODO", "."], (err, stdout) => console.log(stdout));
 
 `ensureTools()`:
 
-- copies the current platform's binaries out of the (possibly read-only) bundle directory into a writable folder and `chmod +x`'s them — so it works even when the deploy pipeline strips file modes or mounts the bundle read-only;
-- prepends that folder to `process.env.PATH` (inherited by every child process);
+- prepends the bundle's own `tools/<platform>/` folder to `process.env.PATH` (inherited by every child process) when the binaries arrived with their executable bits intact;
+- falls back to copying them into a writable folder and `chmod +x`-ing there when the deploy pipeline stripped the file modes — necessary because the deployed bundle directory may be read-only, so the bits can't be restored in place;
 - is memoized and safe to call concurrently; repeat calls and warm instances skip the copy;
 - is a **no-op returning `null`** when the bundle wasn't built with the plugin — in local dev, where you presumably have mise and the tools on `PATH` already, the same code just runs.
 

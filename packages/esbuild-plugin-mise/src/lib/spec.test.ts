@@ -112,10 +112,10 @@ describe("resolveToolSpecs", () => {
 		).rejects.toThrow(/both install a binary named "rg"/);
 	});
 
-	it("rejects an empty tool set", async () => {
+	it("rejects an explicitly empty tools option", async () => {
 		await expect(
 			resolveToolSpecs({ tools: {} }, process.cwd()),
-		).rejects.toThrow(/no tools declared/);
+		).rejects.toThrow(/the `tools` option is empty/);
 	});
 
 	it("falls back to mise.toml, accepting string and table versions", async () => {
@@ -128,7 +128,8 @@ describe("resolveToolSpecs", () => {
 				'"ubi:sharkdp/hyperfine" = { version = "1.18.0" }',
 			].join("\n"),
 		);
-		const specs = await resolveToolSpecs({}, dir);
+		const { specs, skippedReason } = await resolveToolSpecs({}, dir);
+		expect(skippedReason).toBeUndefined();
 		expect(specs.map((s) => [s.name, s.version])).toEqual([
 			["jq", "1.7.1"],
 			["ubi:sharkdp/hyperfine", "1.18.0"],
@@ -138,7 +139,10 @@ describe("resolveToolSpecs", () => {
 	it("resolves a relative configFile against the build cwd", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "neon-mise-spec-"));
 		await writeFile(join(dir, "tools.toml"), '[tools]\njq = "1.7.1"');
-		const specs = await resolveToolSpecs({ configFile: "tools.toml" }, dir);
+		const { specs } = await resolveToolSpecs(
+			{ configFile: "tools.toml" },
+			dir,
+		);
 		expect(specs.map((s) => s.name)).toEqual(["jq"]);
 	});
 
@@ -166,10 +170,28 @@ describe("resolveToolSpecs", () => {
 		);
 	});
 
-	it("errors when no mise config exists", async () => {
+	it("skips (with a reason) when no mise config exists", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "neon-mise-spec-"));
-		await expect(resolveToolSpecs({}, dir)).rejects.toThrow(
-			/no mise config found/,
+		const { specs, skippedReason } = await resolveToolSpecs({}, dir);
+		expect(specs).toEqual([]);
+		expect(skippedReason).toMatch(/no mise config found/);
+	});
+
+	it("skips (with a reason) when an explicit configFile does not exist", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "neon-mise-spec-"));
+		const { specs, skippedReason } = await resolveToolSpecs(
+			{ configFile: "custom-tools.toml" },
+			dir,
 		);
+		expect(specs).toEqual([]);
+		expect(skippedReason).toMatch(/custom-tools\.toml/);
+	});
+
+	it("skips (with a reason) when the config has no [tools] section", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "neon-mise-spec-"));
+		await writeFile(join(dir, "mise.toml"), '[env]\nFOO = "bar"');
+		const { specs, skippedReason } = await resolveToolSpecs({}, dir);
+		expect(specs).toEqual([]);
+		expect(skippedReason).toMatch(/has no \[tools\] section/);
 	});
 });
