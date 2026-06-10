@@ -1,10 +1,16 @@
+import type { DurationString } from "./types.js";
+
 /**
- * Parse a TTL value into whole seconds.
+ * Parse a duration value into whole seconds.
  *
  * Accepted formats:
- * - a positive finite number → interpreted as seconds (must be an integer)
- * - a positive integer string ("3600") → seconds
- * - `<number><unit>` where unit is one of `s`, `m`, `h`, `d`, `w` (e.g. `30s`, `5m`, `1h`, `7d`, `2w`)
+ * - a positive finite **number** → interpreted as seconds (must be an integer)
+ * - a **string** of the form `<integer><unit>` where unit is one of `s`, `m`, `h`, `d`, `w`
+ *   (e.g. `30s`, `5m`, `1h`, `7d`, `2w`)
+ *
+ * A **unit is required** on strings: a bare numeric string like `"7"` is rejected — pass a
+ * `number` (`7`) for raw seconds instead. This removes the ambiguity where `"7"` silently
+ * meant 7 seconds rather than, say, `"7d"`.
  *
  * Returns `{ seconds }` on success or `{ error }` on failure. Pure function — never throws.
  */
@@ -25,17 +31,19 @@ export function parseDuration(
 	const trimmed = input.trim();
 	if (trimmed === "") return { error: "duration string is empty" };
 
-	const numericMatch = /^(\d+)$/.exec(trimmed);
-	if (numericMatch) {
-		const n = Number(numericMatch[1]);
-		if (n <= 0) return { error: `must be > 0, got "${trimmed}"` };
-		return { seconds: n };
+	// A bare numeric string is rejected on purpose: pass a number for raw seconds, or add a
+	// unit (e.g. "7d"). Detected explicitly so we can give a targeted hint instead of the
+	// generic "invalid duration" message.
+	if (/^\d+$/.test(trimmed)) {
+		return {
+			error: `duration string "${input}" is missing a unit; add one of s, m, h, d, w (e.g. "${trimmed}d") or pass ${trimmed} as a number for seconds`,
+		};
 	}
 
 	const unitMatch = /^(\d+)([smhdw])$/i.exec(trimmed);
 	if (!unitMatch) {
 		return {
-			error: `invalid duration "${input}"; expected a number followed by one of: s, m, h, d, w (e.g. "30s", "1h", "7d")`,
+			error: `invalid duration "${input}"; expected an integer followed by one of: s, m, h, d, w (e.g. "30s", "1h", "7d")`,
 		};
 	}
 
@@ -55,12 +63,36 @@ const UNIT_SECONDS = {
 	w: 7 * 24 * 60 * 60,
 } as const;
 
+/** Neon's branch-expiration ceiling: the API rejects an `expires_at` more than 30 days out. */
+export const MAX_BRANCH_TTL_SECONDS = 30 * UNIT_SECONDS.d;
+
+/**
+ * Parse a branch TTL into seconds, enforcing Neon's branch-expiration limit on top of the
+ * shared {@link parseDuration} rules: the result must be `> 0` and at most 30 days
+ * ({@link MAX_BRANCH_TTL_SECONDS}), since the API caps `expires_at` at 30 days from now.
+ *
+ * Returns `{ seconds }` on success or `{ error }` on failure. Pure function — never throws.
+ */
+export function parseBranchTtl(
+	input: string | number,
+): { seconds: number } | { error: string } {
+	const result = parseDuration(input);
+	if ("error" in result) return result;
+	if (result.seconds > MAX_BRANCH_TTL_SECONDS) {
+		return {
+			error: `branch TTL must be at most 30 days (${MAX_BRANCH_TTL_SECONDS}s), got ${result.seconds}s`,
+		};
+	}
+	return result;
+}
+
 /**
  * Render a TTL in seconds back to the canonical "<n><unit>" form. Used for round-trip
  * serialization when {@link pullConfig} emits a TTL value (it always falls back to seconds
- * when no clean unit boundary matches).
+ * when no clean unit boundary matches). The output always carries a unit, so it is a valid
+ * {@link DurationString}.
  */
-export function formatDurationSeconds(totalSeconds: number): string {
+export function formatDurationSeconds(totalSeconds: number): DurationString {
 	if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
 		throw new RangeError(
 			`formatDurationSeconds expected a positive finite number, got ${totalSeconds}`,
@@ -140,7 +172,7 @@ export function parseSuspendTimeout(
  */
 export function formatSuspendTimeout(
 	seconds: number,
-): false | string | undefined {
+): false | DurationString | undefined {
 	if (seconds === -1) return false; // never suspend
 	if (seconds === 0) return undefined; // platform default
 	return formatDurationSeconds(seconds);

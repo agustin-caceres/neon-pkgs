@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { formatDurationSeconds, parseDuration } from "./duration.js";
+import {
+	formatDurationSeconds,
+	MAX_BRANCH_TTL_SECONDS,
+	parseBranchTtl,
+	parseDuration,
+} from "./duration.js";
 
 describe("parseDuration", () => {
 	test.each([
@@ -11,7 +16,6 @@ describe("parseDuration", () => {
 		["7d", 604_800],
 		["2w", 1_209_600],
 		["1W", 604_800],
-		["3600", 3600],
 	])("parses %s as %d seconds", (input, expected) => {
 		const result = parseDuration(input);
 		expect(result).toEqual({ seconds: expected });
@@ -26,7 +30,10 @@ describe("parseDuration", () => {
 		["   ", "duration string is empty"],
 		["abc", 'invalid duration "abc"'],
 		["1h30m", 'invalid duration "1h30m"'],
-		["0", 'must be > 0, got "0"'],
+		// Bare numeric strings are rejected on purpose — pass a number for seconds, or add a unit.
+		["7", "missing a unit"],
+		["3600", "missing a unit"],
+		["0", "missing a unit"],
 		["0s", 'must be > 0, got "0s"'],
 		["-5", 'invalid duration "-5"'],
 	])("rejects %s", (input, expectedErrorFragment) => {
@@ -59,6 +66,32 @@ describe("parseDuration", () => {
 		expect(parseDuration(Number.NaN)).toEqual({
 			error: expect.stringContaining("not a finite number"),
 		});
+	});
+});
+
+describe("parseBranchTtl", () => {
+	test("accepts durations within the 30-day cap", () => {
+		expect(parseBranchTtl("7d")).toEqual({ seconds: 604_800 });
+		expect(parseBranchTtl("30d")).toEqual({
+			seconds: MAX_BRANCH_TTL_SECONDS,
+		});
+		expect(parseBranchTtl(3600)).toEqual({ seconds: 3600 });
+	});
+
+	test("rejects durations over 30 days", () => {
+		const result = parseBranchTtl("31d");
+		expect(result).toHaveProperty("error");
+		expect((result as { error: string }).error).toContain(
+			"at most 30 days",
+		);
+		expect(parseBranchTtl(MAX_BRANCH_TTL_SECONDS + 1)).toHaveProperty(
+			"error",
+		);
+	});
+
+	test("inherits parseDuration rules (unit required, > 0)", () => {
+		expect(parseBranchTtl("7")).toHaveProperty("error");
+		expect(parseBranchTtl(0)).toHaveProperty("error");
 	});
 });
 
