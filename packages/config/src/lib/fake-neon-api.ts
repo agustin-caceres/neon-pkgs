@@ -1,13 +1,17 @@
 import type {
 	CreateBranchInput,
 	CreateBucketInput,
+	CreateCredentialInput,
 	CreateProjectInput,
 	DeployFunctionInput,
 	GetConnectionUriInput,
 	NeonApi,
 	NeonAuthSnapshot,
 	NeonBranchSnapshot,
+	NeonBranchStorageSnapshot,
 	NeonBucketSnapshot,
+	NeonCredentialMeta,
+	NeonCredentialSecret,
 	NeonDataApiSnapshot,
 	NeonDatabaseSnapshot,
 	NeonEndpointSnapshot,
@@ -53,12 +57,26 @@ export class FakeNeonApi implements NeonApi {
 	private readonly neonDataApi = new Map<string, NeonDataApiSnapshot>();
 	/** Preview buckets, keyed by `${projectId}:${branchId}`. */
 	private readonly buckets = new Map<string, NeonBucketSnapshot[]>();
+	/** Object-storage connection overrides, keyed by `${projectId}:${branchId}`. */
+	private readonly branchStorage = new Map<
+		string,
+		NeonBranchStorageSnapshot
+	>();
+	/** Branches where object storage is explicitly disabled (getProjectBranchStorage → null). */
+	private readonly storageDisabled = new Set<string>();
 	/** Preview functions, keyed by `${projectId}:${branchId}`. */
 	private readonly functions = new Map<string, NeonFunctionSnapshot[]>();
 	/** Monotonic per-function deployment counter, keyed by `${projectId}:${branchId}:${slug}`. */
 	private readonly functionDeployments = new Map<string, number>();
 	/** AI Gateway enabled set, keyed by `${projectId}:${branchId}`. */
 	private readonly aiGateway = new Set<string>();
+	/** Issued credentials (incl. secrets), keyed by `${projectId}:${branchId}`. */
+	private readonly credentials = new Map<
+		string,
+		Array<
+			NeonCredentialMeta & { apiToken: string; s3SecretAccessKey: string }
+		>
+	>();
 	readonly history: Array<{ method: string; args: unknown[] }> = [];
 
 	/**
@@ -561,6 +579,30 @@ export class FakeNeonApi implements NeonApi {
 		);
 	}
 
+	async getProjectBranchStorage(
+		projectId: string,
+		branchId: string,
+	): Promise<NeonBranchStorageSnapshot | null> {
+		this.history.push({
+			method: "getProjectBranchStorage",
+			args: [projectId, branchId],
+		});
+		this.requireProject(projectId);
+		this.requireBranch(projectId, branchId);
+		const key = `${projectId}:${branchId}`;
+		if (this.storageDisabled.has(key)) return null;
+		const override = this.branchStorage.get(key);
+		if (override) return clone(override);
+		const region = (
+			this.projects.get(projectId)?.regionId ?? "aws-us-east-1"
+		).replace(/^[a-z]+-/, "");
+		return {
+			s3Endpoint: `https://${branchId}.storage.fake.neon.tech`,
+			region,
+			forcePathStyle: true,
+		};
+	}
+
 	// ─── Preview: functions ────────────────────────────────────────────────────
 
 	async listBranchFunctions(
@@ -688,6 +730,92 @@ export class FakeNeonApi implements NeonApi {
 		this.aiGateway.delete(`${projectId}:${branchId}`);
 	}
 
+	// ─── Preview: branch-scoped credentials ──────────────────────────────────
+
+	async createCredential(
+		projectId: string,
+		branchId: string,
+		input: CreateCredentialInput,
+	): Promise<NeonCredentialSecret> {
+		this.history.push({
+			method: "createCredential",
+			args: [projectId, branchId, input],
+		});
+		this.requireProject(projectId);
+		this.requireBranch(projectId, branchId);
+		const seq = this.nextId.toString(16).padStart(12, "0");
+		this.nextId += 1;
+		const tokenIdShort = `c${seq}`.slice(0, 12);
+		const tokenId = `${tokenIdShort}-fake-fake-fake-${seq}`;
+		const apiToken = `nt_live_${tokenIdShort}_${seq}secret`;
+		const s3SecretAccessKey = `s3secret${seq}`.padEnd(64, "0");
+		const key = `${projectId}:${branchId}`;
+		const list = this.credentials.get(key) ?? [];
+		list.push({
+			tokenId,
+			tokenIdShort,
+			...(input.name !== undefined ? { name: input.name } : {}),
+			scopes: [...input.scopes],
+			principalType: input.principalType,
+			...(input.functionId !== undefined
+				? { functionId: input.functionId }
+				: {}),
+			branchId,
+			createdAt: "2026-01-01T00:00:00Z",
+			apiToken,
+			s3SecretAccessKey,
+		});
+		this.credentials.set(key, list);
+		const secret: NeonCredentialSecret = {
+			tokenId,
+			tokenIdShort,
+			...(input.name !== undefined ? { name: input.name } : {}),
+			apiToken,
+			s3SecretAccessKey,
+			scopes: [...input.scopes],
+			branchId,
+			createdAt: "2026-01-01T00:00:00Z",
+		};
+		return clone(secret);
+	}
+
+	async listCredentials(
+		projectId: string,
+		branchId: string,
+	): Promise<NeonCredentialMeta[]> {
+		this.history.push({
+			method: "listCredentials",
+			args: [projectId, branchId],
+		});
+		this.requireProject(projectId);
+		this.requireBranch(projectId, branchId);
+		const list = this.credentials.get(`${projectId}:${branchId}`) ?? [];
+		return list
+			.filter((c) => c.revokedAt === undefined)
+			.map(({ apiToken: _a, s3SecretAccessKey: _s, ...meta }) =>
+				clone(meta),
+			);
+	}
+
+	async revokeCredential(
+		projectId: string,
+		branchId: string,
+		tokenId: string,
+	): Promise<void> {
+		this.history.push({
+			method: "revokeCredential",
+			args: [projectId, branchId, tokenId],
+		});
+		this.requireProject(projectId);
+		this.requireBranch(projectId, branchId);
+		const list = this.credentials.get(`${projectId}:${branchId}`) ?? [];
+		for (const cred of list) {
+			if (cred.tokenId === tokenId && cred.revokedAt === undefined) {
+				cred.revokedAt = "2026-01-02T00:00:00Z";
+			}
+		}
+	}
+
 	/** Test helper: attach a bucket to a branch. */
 	seedBucket(
 		projectId: string,
@@ -698,6 +826,21 @@ export class FakeNeonApi implements NeonApi {
 		const list = this.buckets.get(key) ?? [];
 		list.push({ ...snapshot });
 		this.buckets.set(key, list);
+	}
+
+	/** Test helper: override a branch's object-storage connection details. */
+	seedBranchStorage(
+		projectId: string,
+		branchId: string,
+		snapshot: NeonBranchStorageSnapshot,
+	): void {
+		this.storageDisabled.delete(`${projectId}:${branchId}`);
+		this.branchStorage.set(`${projectId}:${branchId}`, { ...snapshot });
+	}
+
+	/** Test helper: mark object storage as not enabled on a branch. */
+	seedStorageDisabled(projectId: string, branchId: string): void {
+		this.storageDisabled.add(`${projectId}:${branchId}`);
 	}
 
 	/** Test helper: attach a function to a branch. */

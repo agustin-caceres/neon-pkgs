@@ -1,12 +1,15 @@
 import {
 	type Config,
+	type CredentialScope,
 	createNeonApiFromOptions,
+	deriveCredentialScopes,
 	ErrorCode,
 	type NeonApi,
 	type NeonBranchSnapshot,
 	type NeonDatabaseSnapshot,
 	type NeonRoleSnapshot,
 	PlatformError,
+	type ResolvedPreviewConfig,
 	resolveConfig,
 	type ServiceToggleInput,
 } from "@neondatabase/config/v1";
@@ -53,7 +56,35 @@ export const NEON_ENV_VAR_KEYS = {
 	dataApi: {
 		url: "NEON_DATA_API_URL",
 	},
+	/**
+	 * Object storage (Preview). The S3 SDKs read `AWS_*` from their standard config chain, so
+	 * a branch credential + `neon dev` / `env pull` makes object storage work from env alone.
+	 * `region` is injected under both `AWS_REGION` (SDK-standard) and `NEON_STORAGE_REGION`;
+	 * `forcePathStyle` has no cross-SDK AWS env var, so it keeps its `NEON_` name (the AWS SDKs
+	 * default to path-style for custom endpoints anyway).
+	 */
+	storage: {
+		accessKeyId: "AWS_ACCESS_KEY_ID",
+		secretAccessKey: "AWS_SECRET_ACCESS_KEY",
+		endpoint: "AWS_ENDPOINT_URL_S3",
+		region: "AWS_REGION",
+		regionNeon: "NEON_STORAGE_REGION",
+		forcePathStyle: "NEON_STORAGE_FORCE_PATH_STYLE",
+	},
+	/**
+	 * AI Gateway (Preview). Mapped onto the OpenAI SDK's standard env vars so the OpenAI
+	 * clients work from env alone; `baseUrl` already carries the gateway's OpenAI-dialect route
+	 * prefix (`/ai-gateway/openai/v1`).
+	 */
+	aiGateway: {
+		apiKey: "OPENAI_API_KEY",
+		baseUrl: "OPENAI_BASE_URL",
+	},
 } as const;
+
+/** Route prefix appended to the Neon API origin to form the AI Gateway's OpenAI-dialect base URL. */
+const AI_GATEWAY_OPENAI_PATH = "/ai-gateway/openai/v1";
+const DEFAULT_NEON_API_HOST = "https://console.neon.tech/api/v2";
 
 /** Per-namespace inner shapes. Exposed so consumers can name the parts independently. */
 export interface NeonPostgresEnv {
@@ -91,6 +122,37 @@ export interface NeonDataApiEnv {
 }
 
 /**
+ * S3-compatible object-storage access for the branch (Preview). Present on `NeonEnv` only
+ * when the policy declares `preview.buckets`. Combines a minted branch credential's access
+ * keys (`accessKeyId` = the credential's short token id, `secretAccessKey` = its
+ * `s3_secret_access_key`) with the branch's non-secret connection details
+ * (`endpoint`/`region`/`forcePathStyle`, from `GET .../storage`). Projects to the AWS SDK's
+ * standard config env (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`,
+ * `AWS_REGION`) so the S3 client works from env alone.
+ */
+export interface NeonStorageEnv {
+	accessKeyId: string;
+	secretAccessKey: string;
+	/** S3-compatible endpoint URL for the branch. */
+	endpoint: string;
+	/** AWS region string (e.g. `us-east-2`). Injected as both `AWS_REGION` and `NEON_STORAGE_REGION`. */
+	region: string;
+	/** Whether the S3 client must use path-style addressing (always `true` today). */
+	forcePathStyle: boolean;
+}
+
+/**
+ * AI Gateway access for the branch (Preview). Present on `NeonEnv` only when the policy
+ * enables `preview.aiGateway`. `apiKey` is the minted credential's bearer (`api_token`);
+ * `baseUrl` is the gateway's OpenAI-dialect endpoint (Neon API origin + `/ai-gateway/openai/v1`).
+ * Projects to the OpenAI SDK's standard env (`OPENAI_API_KEY`, `OPENAI_BASE_URL`).
+ */
+export interface NeonAiGatewayEnv {
+	apiKey: string;
+	baseUrl: string;
+}
+
+/**
  * Empty record alias used as the "false" branch of the conditional namespace adds below.
  * `Record<never, never>` is the no-op for intersection — the cleaner alternative to `{}`,
  * which biome rejects (it means "any non-null", not "empty object").
@@ -122,6 +184,39 @@ type ServiceOn<T> = [T] extends [false]
 						? true
 						: false;
 
+/** True when `T` has at least one known key; `false` for `{}` / `never`. */
+type HasKeys<T> = [keyof T] extends [never] ? false : true;
+
+/**
+ * Whether the policy's **static** `preview` block declares at least one object-storage bucket
+ * (`preview.buckets`). Drives whether {@link NeonEnv} carries the `storage` namespace.
+ *
+ * The leading `[never]` guard is load-bearing: when a policy has no `preview` at all,
+ * `NonNullable<C["preview"]>` is `never`, and without the guard the `extends { … }` probe
+ * below would vacuously match (everything extends `never`-derived shapes) and `HasKeys<never>`
+ * would resolve `true`, wrongly adding the namespace. The guard short-circuits to `false`.
+ */
+type HasBuckets<C extends Config> = [NonNullable<C["preview"]>] extends [never]
+	? false
+	: NonNullable<C["preview"]> extends { buckets: infer B }
+		? HasKeys<NonNullable<B>>
+		: false;
+
+/**
+ * Whether the policy's **static** `preview` block enables the AI Gateway
+ * (`preview.aiGateway`). Drives whether {@link NeonEnv} carries the `aiGateway` namespace.
+ *
+ * The leading `[never]` guard is load-bearing for the same reason as {@link HasBuckets}: when
+ * a policy has no `preview`, `NonNullable<C["preview"]>` is `never`, and a naked `never` in the
+ * `extends` below would *distribute* (collapsing the result — and the whole `NeonEnv`
+ * intersection — to `never`). The tuple-wrapped guard short-circuits that to `false`.
+ */
+type AiGatewayOn<C extends Config> = [NonNullable<C["preview"]>] extends [never]
+	? false
+	: NonNullable<C["preview"]> extends { aiGateway: infer A }
+		? ServiceOn<NonNullable<A>>
+		: false;
+
 /**
  * Static, namespaced shape of `fetchEnv` / `parseEnv`'s return value. Generic over the
  * {@link Config} so the type system knows which optional namespaces are present.
@@ -133,6 +228,8 @@ type ServiceOn<T> = [T] extends [false]
  * - `postgres` is always present.
  * - `auth` is added iff `config.auth` is statically enabled.
  * - `dataApi` is added iff `config.dataApi` is statically enabled.
+ * - `storage` is added iff `config.preview.buckets` declares at least one bucket.
+ * - `aiGateway` is added iff `config.preview.aiGateway` is statically enabled.
  */
 export type NeonEnv<C extends Config = Config> = {
 	postgres: NeonPostgresEnv;
@@ -141,6 +238,10 @@ export type NeonEnv<C extends Config = Config> = {
 	: NoNamespace) &
 	(ServiceOn<NonNullable<C["dataApi"]>> extends true
 		? { dataApi: NeonDataApiEnv }
+		: NoNamespace) &
+	(HasBuckets<C> extends true ? { storage: NeonStorageEnv } : NoNamespace) &
+	(AiGatewayOn<C> extends true
+		? { aiGateway: NeonAiGatewayEnv }
 		: NoNamespace);
 
 /** The static `preview.functions` record of a config, or an empty record when absent. */
@@ -361,7 +462,145 @@ export async function fetchEnv<const C extends Config>(
 		result.dataApi = { url: dataApiSnapshot.url } satisfies NeonDataApiEnv;
 	}
 
+	// Object storage + AI Gateway (Preview). A single branch credential is minted (once) to
+	// back whichever of these the policy enables; functions never force a credential but ride
+	// along on its scopes. None of this runs when the policy enables neither, so the
+	// Postgres / Auth / Data API path never touches the credentials/storage endpoints (and
+	// keeps working on production, where they may not exist yet).
+	const wantsStorage = (desired.preview?.buckets.length ?? 0) > 0;
+	const wantsAiGateway = desired.preview?.aiGatewayEnabled ?? false;
+	if (wantsStorage || wantsAiGateway) {
+		const secrets = await resolveCredentialSecrets({
+			api,
+			projectId,
+			branchId: branch.id,
+			branchName: branch.name,
+			scopes: previewCredentialScopes(desired.preview),
+			env: options.env ?? process.env,
+			needStorage: wantsStorage,
+			needApiToken: wantsAiGateway,
+		});
+		if (wantsStorage) {
+			const storage = await api.getProjectBranchStorage(
+				projectId,
+				branch.id,
+			);
+			if (!storage) {
+				throw new PlatformError(
+					ErrorCode.NotFound,
+					[
+						`fetchEnv: branch policy declares object storage (preview.buckets) but storage is not enabled on branch ${branch.name} (${branch.id}).`,
+						"Enable it via `apply(config, { projectId, branchId })` (or in the Neon Console) — then re-run fetchEnv. Or remove preview.buckets.",
+					].join(" "),
+					{ details: { projectId, branchId: branch.id } },
+				);
+			}
+			result.storage = {
+				accessKeyId: secrets.accessKeyId,
+				secretAccessKey: secrets.secretAccessKey,
+				endpoint: storage.s3Endpoint,
+				region: storage.region,
+				forcePathStyle: storage.forcePathStyle,
+			} satisfies NeonStorageEnv;
+		}
+		if (wantsAiGateway) {
+			result.aiGateway = {
+				apiKey: secrets.apiToken,
+				baseUrl: aiGatewayBaseUrl(options.apiHost),
+			} satisfies NeonAiGatewayEnv;
+		}
+	}
+
 	return result as NeonEnv<C>;
+}
+
+/**
+ * Scopes the branch credential should carry for a resolved branch policy. Only object storage
+ * and the AI Gateway *require* a credential; functions never force one (they have no credential
+ * of their own), but `functions:invoke` is added to the scope set when a credential is already
+ * being minted for storage / the AI Gateway, so the one credential can invoke the branch's
+ * functions too. Returns `[]` only when nothing credential-bearing is enabled.
+ */
+function previewCredentialScopes(
+	preview: ResolvedPreviewConfig | undefined,
+): CredentialScope[] {
+	if (!preview) return [];
+	const storage = preview.buckets.length > 0;
+	const aiGateway = preview.aiGatewayEnabled;
+	if (!storage && !aiGateway) return [];
+	return deriveCredentialScopes({
+		storage,
+		aiGateway,
+		functions: preview.functions.length > 0,
+	});
+}
+
+/**
+ * Resolve the branch credential's secrets, reusing the ones already in the env source when
+ * present and minting a fresh `user` credential otherwise. The Neon API returns `api_token` /
+ * `s3_secret_access_key` exactly once at mint time, so the persisted copies (e.g. in
+ * `.env.local`, surfaced as `OPENAI_API_KEY` / `AWS_SECRET_ACCESS_KEY`) are the only way to
+ * recover them — exactly how one-time Auth keys are round-tripped. Reuse is presence-based
+ * (no extra bookkeeping vars): if every secret the enabled features need is already present,
+ * reuse it; otherwise mint one credential covering all currently-needed scopes.
+ */
+async function resolveCredentialSecrets(args: {
+	api: NeonApi;
+	projectId: string;
+	branchId: string;
+	branchName: string;
+	scopes: CredentialScope[];
+	env: NodeJS.ProcessEnv;
+	needStorage: boolean;
+	needApiToken: boolean;
+}): Promise<{
+	accessKeyId: string;
+	secretAccessKey: string;
+	apiToken: string;
+}> {
+	const sKeys = NEON_ENV_VAR_KEYS.storage;
+	const aKeys = NEON_ENV_VAR_KEYS.aiGateway;
+	const haveStorage =
+		!args.needStorage ||
+		Boolean(args.env[sKeys.accessKeyId] && args.env[sKeys.secretAccessKey]);
+	const haveApiToken = !args.needApiToken || Boolean(args.env[aKeys.apiKey]);
+	if (haveStorage && haveApiToken) {
+		return {
+			accessKeyId: args.env[sKeys.accessKeyId] ?? "",
+			secretAccessKey: args.env[sKeys.secretAccessKey] ?? "",
+			apiToken: args.env[aKeys.apiKey] ?? "",
+		};
+	}
+	const minted = await args.api.createCredential(
+		args.projectId,
+		args.branchId,
+		{
+			scopes: args.scopes,
+			principalType: "user",
+			name: `neon-env ${args.branchName}`,
+		},
+	);
+	return {
+		accessKeyId: minted.tokenIdShort,
+		secretAccessKey: minted.s3SecretAccessKey,
+		apiToken: minted.apiToken,
+	};
+}
+
+/**
+ * Build the AI Gateway's OpenAI-dialect base URL (`OPENAI_BASE_URL`) from the Neon API host's
+ * origin plus the gateway route prefix. The host is resolved the same way the API client is:
+ * explicit `apiHost` option → `NEON_API_HOST` env → production default.
+ */
+function aiGatewayBaseUrl(apiHost: string | undefined): string {
+	const host = apiHost ?? process.env.NEON_API_HOST ?? DEFAULT_NEON_API_HOST;
+	let origin: string;
+	try {
+		origin = new URL(host).origin;
+	} catch {
+		origin = new URL(DEFAULT_NEON_API_HOST).origin;
+	}
+	return `${origin}${AI_GATEWAY_OPENAI_PATH}`;
 }
 
 /**
@@ -572,6 +811,46 @@ const dataApiEnvSchema = z.object({
 		.min(1, "NEON_DATA_API_URL must not be empty"),
 });
 
+const storageEnvSchema = z.object({
+	AWS_ACCESS_KEY_ID: z
+		.string({ message: "AWS_ACCESS_KEY_ID is missing" })
+		.min(1, "AWS_ACCESS_KEY_ID must not be empty"),
+	AWS_SECRET_ACCESS_KEY: z
+		.string({ message: "AWS_SECRET_ACCESS_KEY is missing" })
+		.min(1, "AWS_SECRET_ACCESS_KEY must not be empty"),
+	AWS_ENDPOINT_URL_S3: z
+		.string({ message: "AWS_ENDPOINT_URL_S3 is missing" })
+		.min(1, "AWS_ENDPOINT_URL_S3 must not be empty"),
+	AWS_REGION: z
+		.string({ message: "AWS_REGION is missing" })
+		.min(1, "AWS_REGION must not be empty"),
+});
+
+const aiGatewayEnvSchema = z.object({
+	OPENAI_API_KEY: z
+		.string({ message: "OPENAI_API_KEY is missing" })
+		.min(1, "OPENAI_API_KEY must not be empty"),
+	OPENAI_BASE_URL: z
+		.string({ message: "OPENAI_BASE_URL is missing" })
+		.min(1, "OPENAI_BASE_URL must not be empty"),
+});
+
+/** Whether a **static** policy declares object storage (`preview.buckets`). No network. */
+function configWantsStorage(config: Config): boolean {
+	return Object.keys(config.preview?.buckets ?? {}).length > 0;
+}
+
+/** Whether a **static** policy enables the AI Gateway (`preview.aiGateway`). No network. */
+function configWantsAiGateway(config: Config): boolean {
+	return isServiceEnabledInput(config.preview?.aiGateway);
+}
+
+/** Parse the `NEON_STORAGE_FORCE_PATH_STYLE` env string into a boolean (defaults to `true`). */
+function parseForcePathStyle(value: string | undefined): boolean {
+	if (value === undefined) return true;
+	return value.trim().toLowerCase() !== "false";
+}
+
 /** Static-toggle helper mirroring `config`'s `isServiceEnabled` for the env reader. */
 function isServiceEnabledInput(
 	toggle: ServiceToggleInput | undefined,
@@ -671,6 +950,45 @@ export function parseEnv(config: Config, scope?: string): unknown {
 		}
 	}
 
+	if (configWantsStorage(config)) {
+		const storage = storageEnvSchema.safeParse({
+			AWS_ACCESS_KEY_ID: source.AWS_ACCESS_KEY_ID,
+			AWS_SECRET_ACCESS_KEY: source.AWS_SECRET_ACCESS_KEY,
+			AWS_ENDPOINT_URL_S3: source.AWS_ENDPOINT_URL_S3,
+			AWS_REGION: source.AWS_REGION,
+		});
+		if (storage.success) {
+			result.storage = {
+				accessKeyId: storage.data.AWS_ACCESS_KEY_ID,
+				secretAccessKey: storage.data.AWS_SECRET_ACCESS_KEY,
+				endpoint: storage.data.AWS_ENDPOINT_URL_S3,
+				region: storage.data.AWS_REGION,
+				forcePathStyle: parseForcePathStyle(
+					source.NEON_STORAGE_FORCE_PATH_STYLE,
+				),
+			} satisfies NeonStorageEnv;
+		} else {
+			for (const issue of storage.error.issues)
+				issues.push(issue.message);
+		}
+	}
+
+	if (configWantsAiGateway(config)) {
+		const aiGateway = aiGatewayEnvSchema.safeParse({
+			OPENAI_API_KEY: source.OPENAI_API_KEY,
+			OPENAI_BASE_URL: source.OPENAI_BASE_URL,
+		});
+		if (aiGateway.success) {
+			result.aiGateway = {
+				apiKey: aiGateway.data.OPENAI_API_KEY,
+				baseUrl: aiGateway.data.OPENAI_BASE_URL,
+			} satisfies NeonAiGatewayEnv;
+		} else {
+			for (const issue of aiGateway.error.issues)
+				issues.push(issue.message);
+		}
+	}
+
 	if (scope !== undefined) {
 		const fn = config.preview?.functions?.[scope];
 		if (!fn) {
@@ -744,6 +1062,24 @@ export function toEntries(env: NeonEnv<Config>): Record<string, string> {
 	const withDataApi = env as { dataApi?: NeonDataApiEnv };
 	if (withDataApi.dataApi) {
 		out[NEON_ENV_VAR_KEYS.dataApi.url] = withDataApi.dataApi.url;
+	}
+	const withStorage = env as { storage?: NeonStorageEnv };
+	if (withStorage.storage) {
+		const s = withStorage.storage;
+		const keys = NEON_ENV_VAR_KEYS.storage;
+		out[keys.accessKeyId] = s.accessKeyId;
+		out[keys.secretAccessKey] = s.secretAccessKey;
+		out[keys.endpoint] = s.endpoint;
+		// Region is injected under both the AWS-standard and the Neon-specific name.
+		out[keys.region] = s.region;
+		out[keys.regionNeon] = s.region;
+		out[keys.forcePathStyle] = String(s.forcePathStyle);
+	}
+	const withAiGateway = env as { aiGateway?: NeonAiGatewayEnv };
+	if (withAiGateway.aiGateway) {
+		const keys = NEON_ENV_VAR_KEYS.aiGateway;
+		out[keys.apiKey] = withAiGateway.aiGateway.apiKey;
+		out[keys.baseUrl] = withAiGateway.aiGateway.baseUrl;
 	}
 	return out;
 }

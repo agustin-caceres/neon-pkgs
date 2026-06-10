@@ -22,13 +22,17 @@ import { ErrorCode, PlatformError } from "./errors.js";
 import type {
 	CreateBranchInput,
 	CreateBucketInput,
+	CreateCredentialInput,
 	CreateProjectInput,
 	DeployFunctionInput,
 	GetConnectionUriInput,
 	NeonApi,
 	NeonAuthSnapshot,
 	NeonBranchSnapshot,
+	NeonBranchStorageSnapshot,
 	NeonBucketSnapshot,
+	NeonCredentialMeta,
+	NeonCredentialSecret,
 	NeonDataApiSnapshot,
 	NeonDatabaseSnapshot,
 	NeonEndpointSnapshot,
@@ -60,6 +64,12 @@ const bucketSchema = z.object({
 });
 const bucketResponseSchema = z.object({ bucket: bucketSchema });
 const bucketsListResponseSchema = z.object({ buckets: z.array(bucketSchema) });
+const branchStorageSchema = z.object({
+	enabled: z.boolean().optional(),
+	s3_endpoint: z.string(),
+	region: z.string(),
+	force_path_style: z.boolean(),
+});
 
 // ─── Preview: functions ────────────────────────────────────────────────────
 
@@ -80,6 +90,42 @@ const functionsListResponseSchema = z.object({
 });
 const functionDeploymentResponseSchema = z.object({
 	deployment: functionDeploymentSchema,
+});
+
+// ─── Preview: branch-scoped credentials ─────────────────────────────────────
+
+const credentialScopeSchema = z.enum([
+	"storage:read",
+	"storage:write",
+	"ai_gateway:invoke",
+	"functions:invoke",
+]);
+const createCredentialResponseSchema = z.object({
+	token_id: z.string(),
+	token_id_short: z.string(),
+	name: z.string().optional(),
+	api_token: z.string(),
+	s3_secret_access_key: z.string(),
+	scopes: z.array(credentialScopeSchema),
+	branch_id: z.string(),
+	created_at: z.string(),
+	expires_at: z.string().optional(),
+});
+const credentialMetaSchema = z.object({
+	token_id: z.string(),
+	token_id_short: z.string(),
+	name: z.string().optional(),
+	scopes: z.array(credentialScopeSchema),
+	principal_type: z.enum(["user", "function"]),
+	function_id: z.string().optional(),
+	branch_id: z.string().optional(),
+	created_at: z.string(),
+	last_used_at: z.string().optional(),
+	revoked_at: z.string().optional(),
+	expires_at: z.string().optional(),
+});
+const listCredentialsResponseSchema = z.object({
+	credentials: z.array(credentialMetaSchema),
 });
 
 interface CreateNeonAuthRestInput {
@@ -748,6 +794,35 @@ class RealNeonApi implements NeonApi {
 		);
 	}
 
+	async getProjectBranchStorage(
+		projectId: string,
+		branchId: string,
+	): Promise<NeonBranchStorageSnapshot | null> {
+		try {
+			return await this.call(
+				`getProjectBranchStorage(${projectId}/${branchId})`,
+				async () => {
+					const data = await this.getJson(
+						`/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branchId)}/storage`,
+					);
+					const parsed = branchStorageSchema.parse(data);
+					return {
+						s3Endpoint: parsed.s3_endpoint,
+						region: parsed.region,
+						forcePathStyle: parsed.force_path_style,
+					};
+				},
+				{ projectId },
+			);
+		} catch (err) {
+			// 404 BranchStorageNotEnabled → storage not usable on this branch; let the
+			// caller decide (fetchEnv throws a clear "enable storage first" error).
+			if (err instanceof PlatformError && err.code === ErrorCode.NotFound)
+				return null;
+			throw previewUnavailableError(err, "Object storage");
+		}
+	}
+
 	// ─── Preview: functions ────────────────────────────────────────────────────
 
 	async listBranchFunctions(
@@ -888,6 +963,75 @@ class RealNeonApi implements NeonApi {
 			{ projectId, mutating: true },
 		);
 	}
+
+	// ─── Preview: branch-scoped credentials ──────────────────────────────────
+
+	async createCredential(
+		projectId: string,
+		branchId: string,
+		input: CreateCredentialInput,
+	): Promise<NeonCredentialSecret> {
+		try {
+			return await this.call(
+				`createCredential(${projectId}/${branchId})`,
+				async () => {
+					const data = await this.postJson(
+						credentialsPath(projectId, branchId),
+						{
+							scopes: input.scopes,
+							principal_type: input.principalType,
+							...(input.functionId
+								? { function_id: input.functionId }
+								: {}),
+							...(input.name ? { name: input.name } : {}),
+						},
+					);
+					const parsed = createCredentialResponseSchema.parse(data);
+					return createCredentialToSnapshot(parsed);
+				},
+				{ projectId, mutating: true },
+			);
+		} catch (err) {
+			throw previewUnavailableError(err, "Branch credentials");
+		}
+	}
+
+	async listCredentials(
+		projectId: string,
+		branchId: string,
+	): Promise<NeonCredentialMeta[]> {
+		try {
+			return await this.call(
+				`listCredentials(${projectId}/${branchId})`,
+				async () => {
+					const data = await this.getJson(
+						credentialsPath(projectId, branchId),
+					);
+					const parsed = listCredentialsResponseSchema.parse(data);
+					return parsed.credentials.map(credentialMetaToSnapshot);
+				},
+				{ projectId },
+			);
+		} catch (err) {
+			throw previewUnavailableError(err, "Branch credentials");
+		}
+	}
+
+	async revokeCredential(
+		projectId: string,
+		branchId: string,
+		tokenId: string,
+	): Promise<void> {
+		await this.call(
+			`revokeCredential(${projectId}/${branchId}/${tokenId})`,
+			async () => {
+				await this.deleteJson(
+					`${credentialsPath(projectId, branchId)}/${encodeURIComponent(tokenId)}`,
+				);
+			},
+			{ projectId, mutating: true },
+		);
+	}
 }
 
 function branchPreviewPath(
@@ -900,6 +1044,47 @@ function branchPreviewPath(
 
 function aiGatewayPath(projectId: string, branchId: string): string {
 	return `/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branchId)}/ai-gateway`;
+}
+
+function credentialsPath(projectId: string, branchId: string): string {
+	return `/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branchId)}/credentials`;
+}
+
+function createCredentialToSnapshot(
+	data: z.infer<typeof createCredentialResponseSchema>,
+): NeonCredentialSecret {
+	const snapshot: NeonCredentialSecret = {
+		tokenId: data.token_id,
+		tokenIdShort: data.token_id_short,
+		apiToken: data.api_token,
+		s3SecretAccessKey: data.s3_secret_access_key,
+		scopes: data.scopes,
+		branchId: data.branch_id,
+		createdAt: data.created_at,
+	};
+	if (data.name !== undefined) snapshot.name = data.name;
+	if (data.expires_at !== undefined) snapshot.expiresAt = data.expires_at;
+	return snapshot;
+}
+
+function credentialMetaToSnapshot(
+	data: z.infer<typeof credentialMetaSchema>,
+): NeonCredentialMeta {
+	const snapshot: NeonCredentialMeta = {
+		tokenId: data.token_id,
+		tokenIdShort: data.token_id_short,
+		scopes: data.scopes,
+		principalType: data.principal_type,
+		createdAt: data.created_at,
+	};
+	if (data.name !== undefined) snapshot.name = data.name;
+	if (data.function_id !== undefined) snapshot.functionId = data.function_id;
+	if (data.branch_id !== undefined) snapshot.branchId = data.branch_id;
+	if (data.last_used_at !== undefined)
+		snapshot.lastUsedAt = data.last_used_at;
+	if (data.revoked_at !== undefined) snapshot.revokedAt = data.revoked_at;
+	if (data.expires_at !== undefined) snapshot.expiresAt = data.expires_at;
+	return snapshot;
 }
 
 function bucketToSnapshot(

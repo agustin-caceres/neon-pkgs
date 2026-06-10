@@ -84,6 +84,12 @@ export const schemas = {
 
 // ─── Lower-level adapters ──────────────────────────────────────────────────────
 export { createNeonApiFromOptions, resolveApiKey } from "./lib/auth.js";
+// ─── Credentials (pure scope derivation; Preview) ─────────────────────────────
+export type { CredentialFeatureFlags } from "./lib/credentials.js";
+export {
+	credentialScopesSatisfied,
+	deriveCredentialScopes,
+} from "./lib/credentials.js";
 export { defineConfig, resolveConfig } from "./lib/define-config.js";
 // ─── Diff engine (pure; consumed by @neondatabase/config-runtime) ─────────────
 export type {
@@ -111,13 +117,17 @@ export { loadConfigFromFile } from "./lib/loader.js";
 export type {
 	CreateBranchInput,
 	CreateBucketInput,
+	CreateCredentialInput,
 	CreateProjectInput,
 	DeployFunctionInput,
 	GetConnectionUriInput,
 	NeonApi,
 	NeonAuthSnapshot,
 	NeonBranchSnapshot,
+	NeonBranchStorageSnapshot,
 	NeonBucketSnapshot,
+	NeonCredentialMeta,
+	NeonCredentialSecret,
 	NeonDataApiSnapshot,
 	NeonDatabaseSnapshot,
 	NeonEndpointSnapshot,
@@ -140,6 +150,8 @@ export type {
 	ComputeUnit,
 	Config,
 	ConflictReport,
+	CredentialPrincipalType,
+	CredentialScope,
 	DurationString,
 	DurationUnit,
 	FunctionDef,

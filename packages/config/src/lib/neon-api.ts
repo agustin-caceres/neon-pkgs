@@ -1,6 +1,8 @@
 import type {
 	BucketAccessLevel,
 	ComputeSettings,
+	CredentialPrincipalType,
+	CredentialScope,
 	FunctionRuntime,
 } from "./types.js";
 
@@ -123,6 +125,23 @@ export interface NeonBucketSnapshot {
 }
 
 /**
+ * S3-compatible connection details for a branch's object storage (Preview) — the
+ * `BranchStorage` shape from `GET /projects/{id}/branches/{id}/storage`. Non-secret: it
+ * carries the endpoint/region/addressing the S3 SDK needs, while the access keys come from
+ * a minted {@link NeonCredentialSecret}. `forcePathStyle` is always `true` today (Neon's
+ * wildcard TLS cert puts the branch id in the subdomain, so the bucket must travel in the
+ * path).
+ */
+export interface NeonBranchStorageSnapshot {
+	/** S3-compatible endpoint URL, e.g. `https://br-….storage.<suffix>`. */
+	s3Endpoint: string;
+	/** AWS region string, normalized server-side (e.g. `us-east-2`, `us-east-1`). */
+	region: string;
+	/** Whether the S3 client must use path-style addressing (always `true` today). */
+	forcePathStyle: boolean;
+}
+
+/**
  * Input for creating a bucket on a branch.
  */
 export interface CreateBucketInput {
@@ -165,6 +184,66 @@ export interface NeonFunctionDeploymentSnapshot {
 	/** The deployment id (monotonic per function). */
 	id: number;
 	status: "pending" | "building" | "completed" | "failed";
+}
+
+// ─── Preview: branch-scoped credentials ─────────────────────────────────────
+
+/**
+ * Input for {@link NeonApi.createCredential}. Mirrors the Neon API `CreateCredentialRequest`
+ * (`POST .../credentials`, `x-stability-level: beta`):
+ *
+ * - `scopes` — 1–16 capabilities the credential may exercise (derived from the policy's
+ *   enabled Preview features, never hand-authored).
+ * - `principalType` — `user` (developer/app) or `function` (a deployed function).
+ * - `functionId` — required when `principalType === "function"`.
+ * - `name` — optional free-form label echoed back on the response.
+ */
+export interface CreateCredentialInput {
+	scopes: CredentialScope[];
+	principalType: CredentialPrincipalType;
+	functionId?: string;
+	name?: string;
+}
+
+/**
+ * The secret-bearing result of {@link NeonApi.createCredential} — the Neon API
+ * `CreateCredentialResponse`. `apiToken` and `s3SecretAccessKey` are returned **exactly
+ * once** (they are not stored server-side), so the caller must persist them immediately;
+ * they can never be re-fetched (the list endpoint returns metadata only). `tokenIdShort`
+ * is the public identifier embedded in `apiToken` (`nt_live_<tokenIdShort>_…`) and doubles
+ * as the S3 access-key id.
+ */
+export interface NeonCredentialSecret {
+	tokenId: string;
+	tokenIdShort: string;
+	name?: string;
+	/** Bearer token (`nt_live_…`); returned once. Used for AI Gateway / Functions invoke. */
+	apiToken: string;
+	/** 64-char hex S3 secret access key; returned once. Paired with `tokenIdShort` as the access-key id. */
+	s3SecretAccessKey: string;
+	scopes: CredentialScope[];
+	branchId: string;
+	createdAt: string;
+	/** When the credential expires; absent means it never expires. */
+	expiresAt?: string;
+}
+
+/**
+ * Secret-free metadata for an issued credential — the Neon API `CredentialMeta` returned by
+ * {@link NeonApi.listCredentials}. Never includes `apiToken` / `s3SecretAccessKey`.
+ */
+export interface NeonCredentialMeta {
+	tokenId: string;
+	tokenIdShort: string;
+	name?: string;
+	scopes: CredentialScope[];
+	principalType: CredentialPrincipalType;
+	functionId?: string;
+	branchId?: string;
+	createdAt: string;
+	lastUsedAt?: string;
+	revokedAt?: string;
+	expiresAt?: string;
 }
 
 /**
@@ -302,6 +381,17 @@ export interface NeonApi {
 		bucketName: string,
 	): Promise<void>;
 
+	/**
+	 * Fetch the branch's S3-compatible object-storage connection details (endpoint, region,
+	 * path-style). Returns `null` when storage is not enabled for the branch (the API's 404
+	 * `BranchStorageNotEnabled`). Used by `fetchEnv` to populate the `AWS_*` storage env
+	 * alongside the minted credential's access keys.
+	 */
+	getProjectBranchStorage(
+		projectId: string,
+		branchId: string,
+	): Promise<NeonBranchStorageSnapshot | null>;
+
 	// ─── Preview: functions ────────────────────────────────────────────────────
 
 	/** List functions on a branch. */
@@ -351,4 +441,39 @@ export interface NeonApi {
 
 	/** Disable the AI Gateway on a branch. Idempotent. */
 	disableAiGateway(projectId: string, branchId: string): Promise<void>;
+
+	// ─── Preview: branch-scoped credentials ──────────────────────────────────
+
+	/**
+	 * Mint a new scoped service credential on a branch (`POST .../credentials`). The
+	 * returned {@link NeonCredentialSecret} carries `apiToken` + `s3SecretAccessKey`
+	 * **once** — persist them immediately. Used by `fetchEnv` / `env pull` to issue the
+	 * unified credential for the branch's enabled Preview features (object storage, AI
+	 * Gateway, Functions).
+	 */
+	createCredential(
+		projectId: string,
+		branchId: string,
+		input: CreateCredentialInput,
+	): Promise<NeonCredentialSecret>;
+
+	/**
+	 * List the secret-free metadata for credentials issued on a branch
+	 * (`GET .../credentials`). Used to report issued credentials (e.g. `config status`)
+	 * and to verify a persisted credential still exists / isn't revoked.
+	 */
+	listCredentials(
+		projectId: string,
+		branchId: string,
+	): Promise<NeonCredentialMeta[]>;
+
+	/**
+	 * Revoke (soft-delete) a credential by its `tokenId` (`DELETE .../credentials/{id}`).
+	 * Idempotent.
+	 */
+	revokeCredential(
+		projectId: string,
+		branchId: string,
+		tokenId: string,
+	): Promise<void>;
 }

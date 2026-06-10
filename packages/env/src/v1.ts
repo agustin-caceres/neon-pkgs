@@ -14,11 +14,13 @@
 export type {
 	FetchEnvOptions,
 	FunctionSlugOf,
+	NeonAiGatewayEnv,
 	NeonAuthEnv,
 	NeonDataApiEnv,
 	NeonEnv,
 	NeonFunctionEnv,
 	NeonPostgresEnv,
+	NeonStorageEnv,
 } from "./lib/env.js";
 export {
 	fetchEnv,
