@@ -1,0 +1,74 @@
+{
+	"name": "@neondatabase/esbuild-plugin-mise",
+	"version": "0.0.0",
+	"description": "esbuild plugin that ships mise-style CLI tools (ripgrep, jq, gh, …) inside your bundle, plus a tree-shakeable runtime helper that puts them on PATH. Tools are resolved from plugin options or mise.toml and downloaded at build time for the target platforms — nothing is ever installed on the user's system.",
+	"keywords": [
+		"neon",
+		"esbuild",
+		"plugin",
+		"mise",
+		"cli",
+		"tools",
+		"agent",
+		"sandbox"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/neondatabase/neon-pkgs.git"
+	},
+	"license": "Apache-2.0",
+	"author": {
+		"name": "Neon",
+		"url": "https://neon.com"
+	},
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		},
+		"./runtime": {
+			"types": "./dist/runtime.d.ts",
+			"import": "./dist/runtime.js",
+			"default": "./dist/runtime.js"
+		}
+	},
+	"files": [
+		"README.md",
+		"dist/",
+		"package.json"
+	],
+	"scripts": {
+		"build": "tsc --noEmit && tsdown",
+		"prepare": "npm run build",
+		"test": "vitest",
+		"test:ci": "vitest run",
+		"tsc": "tsc"
+	},
+	"devDependencies": {
+		"@types/node": "catalog:",
+		"@vitest/coverage-v8": "3.0.9",
+		"console-fail-test": "0.5.0",
+		"esbuild": "^0.25.0",
+		"tsdown": "catalog:",
+		"typescript": "catalog:",
+		"vitest": "catalog:"
+	},
+	"dependencies": {
+		"fflate": "^0.8.2",
+		"smol-toml": "^1.4.2"
+	},
+	"peerDependencies": {
+		"esbuild": "^0.24.0 || ^0.25.0"
+	},
+	"packageManager": "pnpm@10.4.0",
+	"engines": {
+		"node": ">=22"
+	},
+	"publishConfig": {
+		"provenance": false
+	}
+}

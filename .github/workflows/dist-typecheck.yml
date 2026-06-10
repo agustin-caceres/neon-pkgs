@@ -29,6 +29,8 @@ jobs:
                       dir: config-runtime
                     - name: "@neondatabase/env"
                       dir: env
+                    - name: "@neondatabase/esbuild-plugin-mise"
+                      dir: esbuild-plugin-mise
                     - name: "@neondatabase/functions"
                       dir: functions
         steps:
