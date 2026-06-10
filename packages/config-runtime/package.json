@@ -59,6 +59,7 @@
 	},
 	"dependencies": {
 		"@neondatabase/config": "workspace:*",
+		"@neondatabase/esbuild-plugin-mise": "workspace:*",
 		"esbuild": "^0.25.0",
 		"fflate": "^0.8.2"
 	},

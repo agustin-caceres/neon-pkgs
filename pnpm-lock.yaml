@@ -194,6 +194,9 @@ importers:
       '@neondatabase/config':
         specifier: workspace:*
         version: link:../config
+      '@neondatabase/esbuild-plugin-mise':
+        specifier: workspace:*
+        version: link:../esbuild-plugin-mise
       esbuild:
         specifier: ^0.25.0
         version: 0.25.9

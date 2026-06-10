@@ -4,7 +4,16 @@ import { join } from "node:path";
 import type { ResolvedFunctionConfig } from "@neondatabase/config";
 import type { OutputFile, Plugin } from "esbuild";
 import { unzipSync } from "fflate";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	test,
+	vi,
+} from "vitest";
 import { buildFunctionBundle } from "./function-bundle.js";
 
 /**
@@ -39,6 +48,15 @@ beforeAll(() => {
 });
 afterAll(() => {
 	rmSync(dir, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+	// The always-on mise plugin logs an info when no neon.mise.toml exists —
+	// expected in these tests; keep console-fail-test quiet about it.
+	vi.spyOn(console, "info").mockImplementation(() => undefined);
+});
+afterEach(() => {
+	vi.unstubAllGlobals();
 });
 
 function fn(source: string): ResolvedFunctionConfig {
@@ -114,6 +132,80 @@ describe("buildFunctionBundle", () => {
 		// …and so do the unix permissions, for executables and regular files alike.
 		expect(zipEntryMode(bundle, "tools/linux-arm64/mytool")).toBe(0o755);
 		expect(zipEntryMode(bundle, "index.mjs")).toBe(0o644);
+	});
+
+	test("ships CLI tools declared in neon.mise.toml via the auto-wired mise plugin", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "neon-bundle-cwd-"));
+		writeFileSync(
+			join(cwd, "neon.mise.toml"),
+			'[tools]\n"ubi:acme/mytool" = "1.0.0"\n',
+		);
+		const source = join(cwd, "fn.ts");
+		writeFileSync(
+			source,
+			[
+				// Bare specifier resolved by the plugin itself (the function build
+				// runs with packages: "external"; the runtime must still be bundled).
+				'import { ensureTools } from "@neondatabase/esbuild-plugin-mise/runtime";',
+				"await ensureTools();",
+				"export default { fetch: () => new Response() };",
+			].join("\n"),
+		);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request) => {
+				const url = String(input);
+				if (url.includes("/releases/tags/v1.0.0")) {
+					return new Response(
+						JSON.stringify({
+							tag_name: "v1.0.0",
+							assets: [
+								{
+									name: "mytool-1.0.0-linux-x64",
+									browser_download_url:
+										"https://dl.example/x64",
+								},
+								{
+									name: "mytool-1.0.0-linux-arm64",
+									browser_download_url:
+										"https://dl.example/arm64",
+								},
+							],
+						}),
+						{ status: 200 },
+					);
+				}
+				if (url.startsWith("https://dl.example/")) {
+					return new Response(new TextEncoder().encode("ELF"), {
+						status: 200,
+					});
+				}
+				return new Response("not found", { status: 404 });
+			}),
+		);
+
+		// neon.mise.toml is discovered in the deploy working directory.
+		const prevCwd = process.cwd();
+		process.chdir(cwd);
+		try {
+			const bundle = await buildFunctionBundle(fn(source));
+			const files = unzipSync(bundle);
+			expect(Object.keys(files)).toEqual(
+				expect.arrayContaining([
+					"index.mjs",
+					"tools/linux-x64/mytool",
+					"tools/linux-arm64/mytool",
+				]),
+			);
+			expect(zipEntryMode(bundle, "tools/linux-x64/mytool")).toBe(0o755);
+
+			// The pinned manifest is baked into the function bundle.
+			const js = new TextDecoder().decode(files["index.mjs"]);
+			expect(js).toContain("ubi:acme/mytool");
+		} finally {
+			process.chdir(prevCwd);
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 
 	test("throws a PlatformError when the source cannot be resolved", async () => {

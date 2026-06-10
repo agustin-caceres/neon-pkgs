@@ -2,7 +2,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineConfig, ErrorCode } from "@neondatabase/config";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+	afterAll,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	test,
+	vi,
+} from "vitest";
 import { FakeNeonApi } from "./fake-neon-api.js";
 import { pushConfig } from "./push-config.js";
 
@@ -47,6 +55,12 @@ function seededFake(opts?: { protected?: boolean }) {
 	});
 	return { api, projectId };
 }
+
+beforeEach(() => {
+	// The default bundler always runs the mise plugin, which logs an info when
+	// no neon.mise.toml exists — expected here; keep console-fail-test quiet.
+	vi.spyOn(console, "info").mockImplementation(() => undefined);
+});
 
 describe("pushConfig", () => {
 	test("applies branch-scoped service enables to the selected branch", async () => {

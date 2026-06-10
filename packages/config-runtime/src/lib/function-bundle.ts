@@ -22,13 +22,21 @@ export type FunctionBundler = (
 
 export interface BuildFunctionBundleOptions {
 	/**
-	 * esbuild plugins to run during the bundle build — e.g.
-	 * `@neondatabase/esbuild-plugin-mise` to ship CLI tools alongside the
-	 * function. Wire this in via a custom {@link FunctionBundler}:
+	 * Additional esbuild plugins to run during the bundle build, after the
+	 * built-in ones. Wire this in via a custom {@link FunctionBundler}:
 	 * `(fn) => buildFunctionBundle(fn, { plugins: [...] })`.
 	 */
 	plugins?: Plugin[];
 }
+
+/**
+ * Users opt into shipping CLI tools with their function by dropping this file
+ * (mise `[tools]` format) next to their `neon.ts`. The bundler always passes it
+ * to `@neondatabase/esbuild-plugin-mise`; when the file is absent the plugin
+ * logs an info and bundles no tools. Deliberately not the project's `mise.toml`:
+ * that usually declares language runtimes (node, pnpm, …) the plugin rejects.
+ */
+const NEON_MISE_CONFIG = "neon.mise.toml";
 
 /**
  * Build the deployable bundle (a ZIP archive of the esbuild-bundled source) for a function.
@@ -50,12 +58,18 @@ export interface BuildFunctionBundleOptions {
  * keep their layout), and unix file modes are recorded in the archive — plugins may attach a
  * `mode` property to the `OutputFile`s they append (as `@neondatabase/esbuild-plugin-mise`
  * does for executables); everything else is archived as a regular `0644` file.
+ *
+ * CLI tools: the build always runs `@neondatabase/esbuild-plugin-mise` pointed at
+ * `neon.mise.toml` in the working directory. Users who want CLIs available to their function
+ * (via `ensureTools()` from `@neondatabase/esbuild-plugin-mise/runtime`) declare them there;
+ * without the file the plugin logs an info and ships no tools.
  */
 export async function buildFunctionBundle(
 	fn: ResolvedFunctionConfig,
 	options: BuildFunctionBundleOptions = {},
 ): Promise<Uint8Array> {
 	const esbuild = await loadEsbuild();
+	const { misePlugin } = await loadMisePlugin();
 
 	let result: Awaited<ReturnType<typeof esbuild.build>>;
 	try {
@@ -75,7 +89,10 @@ export async function buildFunctionBundle(
 			// The Functions runtime provides Node built-ins; don't try to bundle them.
 			packages: "external",
 			logLevel: "silent",
-			plugins: options.plugins,
+			plugins: [
+				misePlugin({ configFile: NEON_MISE_CONFIG }),
+				...(options.plugins ?? []),
+			],
 		});
 	} catch (cause) {
 		throw new PlatformError(
@@ -125,6 +142,23 @@ async function loadEsbuild(): Promise<typeof import("esbuild")> {
 			ErrorCode.InvalidConfig,
 			[
 				"Deploying Neon Functions requires `esbuild`, which could not be loaded.",
+				"It is a dependency of @neondatabase/config-runtime — reinstall your dependencies (`pnpm install` / `npm install`).",
+			].join(" "),
+			{ cause },
+		);
+	}
+}
+
+async function loadMisePlugin(): Promise<
+	typeof import("@neondatabase/esbuild-plugin-mise")
+> {
+	try {
+		return await import("@neondatabase/esbuild-plugin-mise");
+	} catch (cause) {
+		throw new PlatformError(
+			ErrorCode.InvalidConfig,
+			[
+				"Deploying Neon Functions requires `@neondatabase/esbuild-plugin-mise`, which could not be loaded.",
 				"It is a dependency of @neondatabase/config-runtime — reinstall your dependencies (`pnpm install` / `npm install`).",
 			].join(" "),
 			{ cause },

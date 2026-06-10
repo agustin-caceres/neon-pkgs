@@ -18,5 +18,10 @@ export default defineConfig({
 	// esbuild and fflate are real, auto-installed dependencies of this package — but they
 	// must stay external so the published runtime resolves them from node_modules rather
 	// than inlining esbuild's native binary into the bundle.
-	external: ["esbuild", "fflate", "@neondatabase/config"],
+	external: [
+		"esbuild",
+		"fflate",
+		"@neondatabase/config",
+		"@neondatabase/esbuild-plugin-mise",
+	],
 });
