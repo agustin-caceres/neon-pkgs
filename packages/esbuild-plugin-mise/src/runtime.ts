@@ -4,18 +4,8 @@
  * code (esbuild, resolution, downloads), so the deployed bundle only carries
  * what's below.
  */
-import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import {
-	access,
-	chmod,
-	copyFile,
-	mkdir,
-	rename,
-	rm,
-	stat,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BakedManifest, BakedTool, Platform } from "./lib/types.js";
@@ -30,12 +20,6 @@ export interface EnsureToolsOptions {
 	 * folder is emitted somewhere else (e.g. code-split chunks in a subfolder).
 	 */
 	bundleDir?: string;
-	/**
-	 * Writable directory to stage the binaries into. Defaults to a
-	 * manifest-keyed folder under `os.tmpdir()`, so repeat calls (and warm
-	 * reuses of the same instance) skip the copy.
-	 */
-	destDir?: string;
 	/** Environment to mutate. Defaults to `process.env`. */
 	env?: NodeJS.ProcessEnv;
 }
@@ -51,16 +35,13 @@ let memo: Promise<EnsureToolsResult | null> | undefined;
 /**
  * Make the tools shipped by the esbuild plugin available on `PATH`.
  *
- * When the deployed binaries are already executable, this simply prepends the
- * bundle's own tools folder to `process.env.PATH`. When the deploy pipeline
- * stripped the executable bits (and the bundle directory is read-only, so they
- * can't be restored in place), it first copies the current platform's binaries
- * into a writable folder and marks them executable. Either way, after this
- * resolves `rg`, `jq`, etc. work from any child process. Call it once at
- * module top level so the work happens during instance initialization rather
+ * Verifies the bundled binaries are present and executable, then prepends the
+ * bundle's `tools/<platform>/` folder to `process.env.PATH` — after this
+ * resolves, `rg`, `jq`, etc. work from any child process. Call it once at
+ * module top level so the check happens during instance initialization rather
  * than on the request path.
  *
- * Memoized: concurrent and repeat calls share one install (options of the
+ * Memoized: concurrent and repeat calls share one result (options of the
  * first call win). Returns `null` when the bundle wasn't built with the
  * plugin, so code stays runnable in environments where the tools come from
  * elsewhere (e.g. local dev with a real mise on PATH).
@@ -71,8 +52,8 @@ export function ensureTools(
 	if (memo === undefined) {
 		const promise = installTools(manifest, options);
 		memo = promise;
-		// Don't memoize failures: a transient staging error (e.g. tmpdir full)
-		// should be retryable on the next call once the condition clears.
+		// Don't memoize failures: a transient error should be retryable on the
+		// next call once the condition clears.
 		promise.catch(() => {
 			if (memo === promise) memo = undefined;
 		});
@@ -100,7 +81,7 @@ export async function installTools(
 		);
 	}
 	// The build ran without a mise config (or with an empty [tools] section):
-	// nothing to stage, nothing to put on PATH.
+	// nothing to put on PATH.
 	if (baked.tools.length === 0) {
 		return { binDir: null, tools: [] };
 	}
@@ -123,88 +104,27 @@ export async function installTools(
 		}
 		bundleDir = dirname(fileURLToPath(import.meta.url));
 	}
-	const srcDir = join(bundleDir, baked.toolsDir, platform);
-	const env = options.env ?? process.env;
+	const binDir = join(bundleDir, baked.toolsDir, platform);
 
-	// Fast path: when the deploy pipeline preserved the executable bits, the
-	// bundled tools folder itself goes on PATH — no copy at all. The staging
-	// fallback below exists for pipelines that strip file modes and mount the
-	// bundle read-only (so the bits can't be restored in place).
-	if (await allExecutable(srcDir, baked.tools)) {
-		prependToPath(srcDir, env);
-		return { binDir: srcDir, tools: baked.tools };
-	}
-
-	const key = createHash("sha256")
-		.update(JSON.stringify({ platform, tools: baked.tools }))
-		.digest("hex")
-		.slice(0, 16);
-	const destDir = options.destDir ?? join(tmpdir(), `neon-tools-${key}`);
-
-	if (!(await isDirectory(destDir))) {
-		await stage(srcDir, destDir, baked.tools, baked.toolsDir);
-	}
-
-	prependToPath(destDir, env);
-	return { binDir: destDir, tools: baked.tools };
-}
-
-/**
- * Copy the binaries into place via a staging dir + atomic rename, so a
- * concurrent process either sees no `destDir` or a complete one — never a
- * half-written set of tools.
- */
-async function stage(
-	srcDir: string,
-	destDir: string,
-	tools: BakedTool[],
-	toolsDir: string,
-): Promise<void> {
-	const staging = `${destDir}.staging-${process.pid}-${Math.random().toString(36).slice(2)}`;
-	await mkdir(staging, { recursive: true });
-	try {
-		for (const tool of tools) {
-			const src = join(srcDir, tool.bin);
-			const dest = join(staging, tool.bin);
-			try {
-				await copyFile(src, dest);
-			} catch (cause) {
-				throw new Error(
-					`@neondatabase/esbuild-plugin-mise: tool binary not found at ${src}. Was the bundle built with the plugin and deployed with its "${toolsDir}" folder intact?`,
-					{ cause },
-				);
-			}
-			await chmod(dest, 0o755);
+	for (const tool of baked.tools) {
+		const bin = join(binDir, tool.bin);
+		try {
+			await access(bin, constants.X_OK);
+		} catch {
+			const exists = await access(bin, constants.F_OK).then(
+				() => true,
+				() => false,
+			);
+			throw new Error(
+				exists
+					? `@neondatabase/esbuild-plugin-mise: ${bin} exists but is not executable — the deploy pipeline stripped its file mode. Deploy with a bundler that records unix modes (e.g. @neondatabase/config-runtime's function bundler).`
+					: `@neondatabase/esbuild-plugin-mise: tool binary not found at ${bin}. Was the bundle built with the plugin and deployed with its "${baked.toolsDir}" folder intact?`,
+			);
 		}
-		await rename(staging, destDir);
-	} catch (error) {
-		await rm(staging, { recursive: true, force: true });
-		// Lost the rename race to another process? Their copy is complete — use it.
-		if (await isDirectory(destDir)) return;
-		throw error;
 	}
-}
 
-async function allExecutable(
-	srcDir: string,
-	tools: BakedTool[],
-): Promise<boolean> {
-	try {
-		await Promise.all(
-			tools.map((tool) => access(join(srcDir, tool.bin), constants.X_OK)),
-		);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function isDirectory(path: string): Promise<boolean> {
-	try {
-		return (await stat(path)).isDirectory();
-	} catch {
-		return false;
-	}
+	prependToPath(binDir, options.env ?? process.env);
+	return { binDir, tools: baked.tools };
 }
 
 function prependToPath(dir: string, env: NodeJS.ProcessEnv): void {

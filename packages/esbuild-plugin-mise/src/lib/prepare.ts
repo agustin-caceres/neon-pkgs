@@ -82,13 +82,7 @@ async function prepareTool(
 			data: await downloadBinary(url, assetName, spec.bin, cacheDir),
 		})),
 	);
-	// Per-platform content hashes ride along in the manifest, so the runtime's
-	// staging key changes whenever the actual bytes do — two apps shipping
-	// different binaries under the same name/version never share a staging dir.
-	const hashes = Object.fromEntries(
-		files.map((f) => [f.platform, sha256(f.data)]),
-	);
-	return { tool: { name: spec.name, version, bin: spec.bin, hashes }, files };
+	return { tool: { name: spec.name, version, bin: spec.bin }, files };
 }
 
 /** Last path segment with any query string / fragment stripped. */

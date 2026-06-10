@@ -82,8 +82,6 @@ export interface BakedTool {
 	name: string;
 	version: string;
 	bin: string;
-	/** Per-platform sha256 of the shipped binary — keys the runtime's staging dir to the actual content. */
-	hashes?: Partial<Record<Platform, string>>;
 }
 
 /**

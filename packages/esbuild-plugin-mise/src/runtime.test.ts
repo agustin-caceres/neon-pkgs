@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,14 +7,15 @@ import { installTools } from "./runtime.js";
 
 const platform = `${process.platform}-${process.arch}` as Platform;
 
-async function makeBundleDir(bins: Record<string, string>): Promise<string> {
+async function makeBundleDir(
+	bins: Record<string, string>,
+	mode: number,
+): Promise<string> {
 	const bundleDir = await mkdtemp(join(tmpdir(), "neon-mise-bundle-"));
 	const toolsDir = join(bundleDir, "tools", platform);
 	await mkdir(toolsDir, { recursive: true });
 	for (const [bin, content] of Object.entries(bins)) {
-		// No executable bit on purpose: the bundle pipeline may strip modes, and
-		// the runtime must restore them when staging.
-		await writeFile(join(toolsDir, bin), content, { mode: 0o644 });
+		await writeFile(join(toolsDir, bin), content, { mode });
 	}
 	return bundleDir;
 }
@@ -37,72 +38,48 @@ describe("installTools", () => {
 		expect(warn).toHaveBeenCalledOnce();
 	});
 
-	it.skipIf(process.platform === "win32")(
-		"puts the bundled tools folder itself on PATH when the binaries are already executable",
-		async () => {
-			const bundleDir = await mkdtemp(
-				join(tmpdir(), "neon-mise-bundle-"),
-			);
-			const toolsDir = join(bundleDir, "tools", platform);
-			await mkdir(toolsDir, { recursive: true });
-			await writeFile(join(toolsDir, "fakebin"), "#!/bin/sh", {
-				mode: 0o755,
-			});
-			const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
-
-			const result = await installTools(makeManifest(["fakebin"]), {
-				bundleDir,
-				env,
-			});
-
-			// No copy: PATH points straight at the bundle's own folder.
-			expect(result?.binDir).toBe(toolsDir);
-			expect(env.PATH).toBe(`${toolsDir}${delimiter}/usr/bin`);
-		},
-	);
-
-	it("stages binaries into a writable dir, chmods them, and prepends PATH", async () => {
-		const bundleDir = await makeBundleDir({
-			fakebin: "#!/bin/sh\necho hi",
-		});
-		const destDir = join(
-			await mkdtemp(join(tmpdir(), "neon-mise-dest-")),
-			"tools",
-		);
+	it("prepends the bundled tools folder to PATH", async () => {
+		const bundleDir = await makeBundleDir({ fakebin: "#!/bin/sh" }, 0o755);
+		const toolsDir = join(bundleDir, "tools", platform);
 		const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
 
 		const result = await installTools(makeManifest(["fakebin"]), {
 			bundleDir,
-			destDir,
 			env,
 		});
 
 		expect(result).toEqual({
-			binDir: destDir,
+			binDir: toolsDir,
 			tools: [{ name: "fakebin", version: "1.0.0", bin: "fakebin" }],
 		});
-		expect(env.PATH).toBe(`${destDir}${delimiter}/usr/bin`);
-		const staged = join(destDir, "fakebin");
-		expect(await readFile(staged, "utf8")).toBe("#!/bin/sh\necho hi");
-		if (process.platform !== "win32") {
-			expect((await stat(staged)).mode & 0o111).not.toBe(0);
-		}
+		expect(env.PATH).toBe(`${toolsDir}${delimiter}/usr/bin`);
 	});
 
-	it("is idempotent: reuses an existing dest and never duplicates PATH entries", async () => {
-		const bundleDir = await makeBundleDir({ fakebin: "v1" });
-		const destDir = join(
-			await mkdtemp(join(tmpdir(), "neon-mise-dest-")),
-			"tools",
-		);
+	it("never duplicates the PATH entry on repeat calls", async () => {
+		const bundleDir = await makeBundleDir({ fakebin: "v1" }, 0o755);
 		const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
 		const manifest = makeManifest(["fakebin"]);
 
-		await installTools(manifest, { bundleDir, destDir, env });
-		await installTools(manifest, { bundleDir, destDir, env });
+		await installTools(manifest, { bundleDir, env });
+		await installTools(manifest, { bundleDir, env });
 
-		expect(env.PATH).toBe(`${destDir}${delimiter}/usr/bin`);
+		expect(env.PATH).toBe(
+			`${join(bundleDir, "tools", platform)}${delimiter}/usr/bin`,
+		);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"fails with a deploy-pipeline hint when a binary lost its executable bit",
+		async () => {
+			const bundleDir = await makeBundleDir(
+				{ fakebin: "stripped" },
+				0o644,
+			);
+			await expect(
+				installTools(makeManifest(["fakebin"]), { bundleDir, env: {} }),
+			).rejects.toThrow(/exists but is not executable.*deploy pipeline/);
+		},
+	);
 
 	it("no-ops on an empty manifest (build ran without a mise config)", async () => {
 		const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
@@ -136,13 +113,8 @@ describe("installTools", () => {
 
 	it("explains when the tools folder is missing from the deployed bundle", async () => {
 		const bundleDir = await mkdtemp(join(tmpdir(), "neon-mise-empty-"));
-		const destDir = join(bundleDir, "dest");
 		await expect(
-			installTools(makeManifest(["fakebin"]), {
-				bundleDir,
-				destDir,
-				env: {},
-			}),
+			installTools(makeManifest(["fakebin"]), { bundleDir, env: {} }),
 		).rejects.toThrow(/tool binary not found at/);
 	});
 });

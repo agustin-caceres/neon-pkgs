@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { BuildOptions, OutputFile, Plugin } from "esbuild";
 import { type PreparedTools, prepareTools } from "./lib/prepare.js";
 import { resolveToolSpecs } from "./lib/spec.js";
@@ -30,6 +32,12 @@ export const MANIFEST_MODULE_PATTERN =
 
 const DEFAULT_PLATFORMS: Platform[] = ["linux-x64", "linux-arm64"];
 
+/** This package's runtime module, next to this file — `.js` as published, `.ts` in this workspace. */
+const RUNTIME_MODULE =
+	["./runtime.js", "./runtime.ts"].find((p) =>
+		existsSync(fileURLToPath(new URL(p, import.meta.url))),
+	) ?? "./runtime.js";
+
 interface Prepared extends PreparedTools {
 	manifest: BakedManifest;
 }
@@ -42,9 +50,8 @@ interface Prepared extends PreparedTools {
  * each target platform into a project-local cache — never installing anything
  * on the system — and emits them under `<outdir>/<toolsDir>/<platform>/`.
  * It also bakes the resolved manifest into
- * `@neondatabase/esbuild-plugin-mise/runtime`, whose `ensureTools()` stages
- * the right platform's binaries into a writable directory and prepends it to
- * `PATH` at runtime.
+ * `@neondatabase/esbuild-plugin-mise/runtime`, whose `ensureTools()` prepends
+ * the right platform's tools folder to `PATH` at runtime.
  */
 export function misePlugin(options: MisePluginOptions = {}): Plugin {
 	return {
@@ -99,6 +106,20 @@ export function misePlugin(options: MisePluginOptions = {}): Plugin {
 				});
 				return promise;
 			};
+
+			// Builds that externalize bare imports (`packages: "external"` — the
+			// Neon Functions bundler does this) would leave the runtime module out
+			// of the bundle, so the manifest could never be baked. The runtime ships
+			// in this very package, so resolve it ourselves and force it internal.
+			build.onResolve(
+				{ filter: /^@neondatabase\/esbuild-plugin-mise\/runtime$/ },
+				() => ({
+					path: fileURLToPath(
+						new URL(RUNTIME_MODULE, import.meta.url),
+					),
+					external: false,
+				}),
+			);
 
 			let manifestBaked = false;
 			build.onLoad({ filter: MANIFEST_MODULE_PATTERN }, async () => {
@@ -195,8 +216,12 @@ function makeOutputFile(path: string, contents: Uint8Array): OutputFile {
 		// Real content hash so consumers diffing outputFiles between rebuilds see
 		// tool binaries change (esbuild populates this field for its own outputs).
 		hash: createHash("sha256").update(contents).digest("hex").slice(0, 16),
+		// Not part of esbuild's OutputFile: mode-aware archivers (e.g.
+		// @neondatabase/config-runtime's function bundler) read this to record
+		// the executable bit, which PATH lookup requires at runtime.
+		mode: 0o755,
 		get text() {
 			return new TextDecoder().decode(contents);
 		},
-	};
+	} as OutputFile & { mode: number };
 }

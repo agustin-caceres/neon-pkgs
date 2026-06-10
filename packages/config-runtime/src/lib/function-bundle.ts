@@ -1,9 +1,12 @@
-import { basename } from "node:path";
+import { basename, relative, sep } from "node:path";
 import {
 	ErrorCode,
 	PlatformError,
 	type ResolvedFunctionConfig,
 } from "@neondatabase/config";
+// Type-only — erased at compile time, so esbuild still never enters this
+// package's static module graph (see the note on dynamic imports below).
+import type { Plugin } from "esbuild";
 
 /**
  * Builds the deployable ZIP bundle for a single function. The default
@@ -16,6 +19,16 @@ import {
 export type FunctionBundler = (
 	fn: ResolvedFunctionConfig,
 ) => Promise<Uint8Array>;
+
+export interface BuildFunctionBundleOptions {
+	/**
+	 * esbuild plugins to run during the bundle build — e.g.
+	 * `@neondatabase/esbuild-plugin-mise` to ship CLI tools alongside the
+	 * function. Wire this in via a custom {@link FunctionBundler}:
+	 * `(fn) => buildFunctionBundle(fn, { plugins: [...] })`.
+	 */
+	plugins?: Plugin[];
+}
 
 /**
  * Build the deployable bundle (a ZIP archive of the esbuild-bundled source) for a function.
@@ -32,10 +45,15 @@ export type FunctionBundler = (
  * a second layer of protection on top of the package split.
  *
  * Mirrors: `esbuild <source> --bundle --outfile=index.mjs --sourcemap --minify`, then zips
- * the emitted files into the archive the Functions deploy endpoint expects.
+ * the emitted files into the archive the Functions deploy endpoint expects. Output paths are
+ * archived relative to the build output root (so plugin-emitted files like `tools/<platform>/rg`
+ * keep their layout), and unix file modes are recorded in the archive — plugins may attach a
+ * `mode` property to the `OutputFile`s they append (as `@neondatabase/esbuild-plugin-mise`
+ * does for executables); everything else is archived as a regular `0644` file.
  */
 export async function buildFunctionBundle(
 	fn: ResolvedFunctionConfig,
+	options: BuildFunctionBundleOptions = {},
 ): Promise<Uint8Array> {
 	const esbuild = await loadEsbuild();
 
@@ -57,6 +75,7 @@ export async function buildFunctionBundle(
 			// The Functions runtime provides Node built-ins; don't try to bundle them.
 			packages: "external",
 			logLevel: "silent",
+			plugins: options.plugins,
 		});
 	} catch (cause) {
 		throw new PlatformError(
@@ -69,19 +88,30 @@ export async function buildFunctionBundle(
 		);
 	}
 
-	const entries: Record<string, Uint8Array> = {};
+	// esbuild resolved the relative `outfile` against its working directory
+	// (cwd), so output paths are archived relative to cwd to preserve layout.
+	const outBase = process.cwd();
+	const entries: Record<string, [Uint8Array, { os: number; attrs: number }]> =
+		{};
 	// `write: false` guarantees `outputFiles`, but the type is optional — guard for safety.
 	for (const file of result.outputFiles ?? []) {
-		// esbuild returns absolute output paths; archive them under their basename
-		// (`index.mjs`, `index.mjs.map`) so the bundle layout is stable regardless of cwd.
-		entries[basename(file.path)] = file.contents;
+		const rel = relative(outBase, file.path);
+		const name = rel.startsWith("..")
+			? basename(file.path)
+			: rel.split(sep).join("/");
+		const mode = (file as { mode?: number }).mode ?? 0o644;
+		entries[name] = [
+			file.contents,
+			// External attributes for os 3 (Unix): full st_mode in the high 16 bits.
+			{ os: 3, attrs: ((0o100000 | mode) << 16) >>> 0 },
+		];
 	}
 
 	return zipBundle(entries);
 }
 
 async function zipBundle(
-	entries: Record<string, Uint8Array>,
+	entries: Record<string, [Uint8Array, { os: number; attrs: number }]>,
 ): Promise<Uint8Array> {
 	const { zipSync } = await loadFflate();
 	return zipSync(entries, { level: 6 });

@@ -192,19 +192,12 @@ describe("misePlugin", () => {
 
 			const cacheDir = await mkdtemp(join(tmpdir(), "neon-mise-cache-"));
 			const outdir = await mkdtemp(join(tmpdir(), "neon-mise-out-"));
-			const destDir = join(
-				await mkdtemp(join(tmpdir(), "neon-mise-dest-")),
-				"staged",
-			);
-			const runtimeModule = fileURLToPath(
-				new URL("./runtime.ts", import.meta.url),
-			);
 			await build({
 				stdin: {
 					contents: `
-						import { ensureTools } from ${JSON.stringify(runtimeModule)};
+						import { ensureTools } from "@neondatabase/esbuild-plugin-mise/runtime";
 						import { execFileSync } from "node:child_process";
-						const result = await ensureTools({ destDir: ${JSON.stringify(destDir)} });
+						const result = await ensureTools();
 						if (result === null) throw new Error("manifest was not baked in");
 						console.log(execFileSync("mytool", { encoding: "utf8" }).trim());
 					`,
@@ -214,6 +207,9 @@ describe("misePlugin", () => {
 				bundle: true,
 				format: "esm",
 				platform: "node",
+				// The Neon Functions bundler builds with packages:"external"; the
+				// plugin must still resolve + bundle its own runtime module.
+				packages: "external",
 				outfile: join(outdir, "index.mjs"),
 				plugins: [
 					misePlugin({

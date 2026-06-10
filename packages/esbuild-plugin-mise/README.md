@@ -3,8 +3,8 @@
 Ship CLI tools (ripgrep, jq, gh, …) **inside your esbuild bundle**, and put them on `PATH` at runtime with one call. Designed for code that runs in sandboxes you don't control — serverless functions, agent runtimes — where the deployed filesystem is read-only and `apt-get` doesn't exist.
 
 - **Build time**: the plugin resolves your tool list (from plugin options or your project's [`mise.toml`](https://mise.jdx.dev/)), downloads the matching release binaries for each target platform, and emits them next to your bundle under `tools/<platform>/`.
-- **Runtime**: a tree-shakeable helper (`@neondatabase/esbuild-plugin-mise/runtime`) stages the current platform's binaries into a writable directory, marks them executable, and prepends that directory to `process.env.PATH`. Your code — or your agent's `bash` tool — can then just run `rg`, `jq`, `gh`.
-- **Never pollutes the user's system**: nothing is installed globally. Build-time downloads are cached under `node_modules/.cache/`, runtime staging goes to `os.tmpdir()`. No `$HOME`, no shell profile.
+- **Runtime**: a tree-shakeable helper (`@neondatabase/esbuild-plugin-mise/runtime`) prepends the bundled `tools/<platform>/` folder to `process.env.PATH`. Your code — or your agent's `bash` tool — can then just run `rg`, `jq`, `gh`.
+- **Never pollutes the user's system**: nothing is installed globally, nothing is written at runtime. Build-time downloads are cached under `node_modules/.cache/`. No `$HOME`, no shell profile.
 
 > **Note:** this plugin does not run mise. It parses your `mise.toml` and reimplements a subset of mise's `ubi` (GitHub releases) backend in TypeScript, because mise can only install tools for the platform it runs on — and here the build machine and the deploy target usually differ. A mise installation is neither required nor touched.
 
@@ -65,9 +65,9 @@ execFile("rg", ["--json", "TODO", "."], (err, stdout) => console.log(stdout));
 
 `ensureTools()`:
 
-- prepends the bundle's own `tools/<platform>/` folder to `process.env.PATH` (inherited by every child process) when the binaries arrived with their executable bits intact;
-- falls back to copying them into a writable folder and `chmod +x`-ing there when the deploy pipeline stripped the file modes — necessary because the deployed bundle directory may be read-only, so the bits can't be restored in place;
-- is memoized and safe to call concurrently; repeat calls and warm instances skip the copy;
+- verifies the bundled binaries are present and executable (failing with an actionable error if the deploy pipeline stripped file modes — see Limitations), then prepends the bundle's own `tools/<platform>/` folder to `process.env.PATH` (inherited by every child process);
+- writes nothing: the binaries run in place, straight from the deployed bundle;
+- is memoized and safe to call concurrently;
 - is a **no-op returning `null`** when the bundle wasn't built with the plugin — in local dev, where you presumably have mise and the tools on `PATH` already, the same code just runs.
 
 The `/runtime` subpath contains no plugin code: importing it does not pull esbuild, the resolver, or anything network-related into your bundle.
@@ -96,14 +96,13 @@ misePlugin({
 });
 ```
 
-`ensureTools(options?)` accepts `bundleDir` (where `tools/` lives, default: the bundle's own directory), `destDir` (writable staging dir, default: a manifest-keyed folder under `os.tmpdir()`), and `env` (defaults to `process.env`).
+`ensureTools(options?)` accepts `bundleDir` (where `tools/` lives, default: the bundle's own directory) and `env` (defaults to `process.env`).
 
 ## Limitations
 
 - Single-binary CLI tools only — no language runtimes, no tools that need an installer.
+- **The deploy pipeline must preserve unix file modes** end-to-end: the binaries run in place, so they must arrive executable. `@neondatabase/config-runtime`'s function bundler records modes in its archives (and accepts this plugin via `buildFunctionBundle(fn, { plugins: [...] })`); if your pipeline strips them, `ensureTools()` fails with an explicit error rather than letting `spawn` hit a cryptic `EACCES`.
 - `.tar.xz` / `.tar.bz2` / `.tar.zst` / `.7z` release assets cannot be extracted (the asset picker skips them); most projects also publish `.tar.gz` or `.zip`.
 - Public GitHub repositories only — `GITHUB_TOKEN` lifts the API rate limit but private release assets are not supported.
 - Linux and macOS targets only (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`).
-- The runtime helper must be **bundled**: with `packages: "external"` (or this package marked external) the manifest can't be baked in and `ensureTools()` no-ops — the plugin emits a build warning when that happens.
-- The default staging directory under `os.tmpdir()` is content-keyed but predictable; on shared multi-user hosts pass a private `destDir`. (In single-tenant sandboxes — the intended target — this doesn't apply.)
 - The bundle grows by the size of each tool × each target platform. Keep the tool set lean and the platform list tight.
