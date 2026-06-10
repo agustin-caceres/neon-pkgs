@@ -101,13 +101,22 @@ describe("installTools", () => {
 		);
 	});
 
-	it("throws when the current platform was not bundled", async () => {
+	it("no-ops (with a warning) when the current platform was not bundled — local runs of deploy-targeted bundles", async () => {
+		const warn = vi
+			.spyOn(process, "emitWarning")
+			.mockImplementation(() => undefined);
 		const manifest: BakedManifest = {
 			...makeManifest(["fakebin"]),
 			platforms: [],
 		};
-		await expect(installTools(manifest, { env: {} })).rejects.toThrow(
-			new RegExp(`no tools were bundled for ${platform}`),
+		const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+
+		expect(await installTools(manifest, { env })).toBeNull();
+
+		// PATH untouched: whatever the developer has (e.g. a real mise) wins.
+		expect(env.PATH).toBe("/usr/bin");
+		expect(warn).toHaveBeenCalledWith(
+			expect.stringMatching(`no tools were bundled for ${platform}`),
 		);
 	});
 

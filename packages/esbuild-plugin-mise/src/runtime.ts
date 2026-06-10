@@ -88,9 +88,15 @@ export async function installTools(
 
 	const platform = `${process.platform}-${process.arch}` as Platform;
 	if (!baked.platforms.includes(platform)) {
-		throw new Error(
-			`@neondatabase/esbuild-plugin-mise: no tools were bundled for ${platform} (bundled: ${baked.platforms.join(", ")}). Add it to the plugin's \`platforms\` option and rebuild.`,
+		// Running a deploy-targeted bundle on another machine — typically a local
+		// smoke-test of a linux-targeted build on a mac, where the tools are
+		// expected to come from the developer's own setup (e.g. a real mise).
+		// Leave PATH alone instead of failing; if this is a misconfigured deploy
+		// target, the warning names the fix.
+		process.emitWarning(
+			`ensureTools() is a no-op: no tools were bundled for ${platform} (bundled: ${baked.platforms.join(", ")}). Locally, tools are expected on PATH already; for a deploy target, add ${platform} to the plugin's \`platforms\` option and rebuild.`,
 		);
+		return null;
 	}
 
 	let bundleDir = options.bundleDir;

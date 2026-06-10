@@ -68,7 +68,7 @@ execFile("rg", ["--json", "TODO", "."], (err, stdout) => console.log(stdout));
 - verifies the bundled binaries are present and executable (failing with an actionable error if the deploy pipeline stripped file modes — see Limitations), then prepends the bundle's own `tools/<platform>/` folder to `process.env.PATH` (inherited by every child process);
 - writes nothing: the binaries run in place, straight from the deployed bundle;
 - is memoized and safe to call concurrently;
-- is a **no-op returning `null`** when the bundle wasn't built with the plugin — in local dev, where you presumably have mise and the tools on `PATH` already, the same code just runs.
+- is a **no-op returning `null`** (with a process warning) when the bundle wasn't built with the plugin, *and* when it was built for other platforms than the current one — e.g. smoke-testing a linux-targeted bundle on your mac. In both cases `PATH` is left alone, so local dev with a real mise (tools already on `PATH`) just works.
 
 The `/runtime` subpath contains no plugin code: importing it does not pull esbuild, the resolver, or anything network-related into your bundle.
 
