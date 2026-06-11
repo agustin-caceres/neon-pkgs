@@ -324,34 +324,18 @@ function synthesizeAppliedChange(step: PlanStep): AppliedChange {
 				},
 			};
 		case "enable-auth":
-			return {
-				kind: "service",
-				action: "create",
-				identifier: "auth",
-				details: {
-					branchName: step.branchName,
-					...(step.databaseName
-						? { databaseName: step.databaseName }
-						: {}),
-				},
-			};
+			// Pure branch on/off toggle: the target branch is redundant (same on
+			// every row) and the database is auto-derived, not policy-chosen — so
+			// there is nothing meaningful to surface in the change summary.
+			return { kind: "service", action: "create", identifier: "auth" };
 		case "enable-data-api":
-			return {
-				kind: "service",
-				action: "create",
-				identifier: "dataApi",
-				details: {
-					branchName: step.branchName,
-					databaseName: step.databaseName,
-				},
-			};
+			return { kind: "service", action: "create", identifier: "dataApi" };
 		case "create-bucket":
 			return {
 				kind: "service",
 				action: "create",
 				identifier: `bucket:${step.bucketName}`,
 				details: {
-					branchName: step.branchName,
 					bucketName: step.bucketName,
 					accessLevel: step.accessLevel,
 				},
@@ -362,7 +346,6 @@ function synthesizeAppliedChange(step: PlanStep): AppliedChange {
 				action: "create",
 				identifier: `function:${step.fn.slug}`,
 				details: {
-					branchName: step.branchName,
 					slug: step.fn.slug,
 					name: step.fn.name,
 				},
@@ -373,7 +356,6 @@ function synthesizeAppliedChange(step: PlanStep): AppliedChange {
 				action: "update",
 				identifier: `function:${step.fn.slug}`,
 				details: {
-					branchName: step.branchName,
 					slug: step.fn.slug,
 					source: step.fn.source,
 					runtime: step.fn.runtime,
@@ -384,7 +366,6 @@ function synthesizeAppliedChange(step: PlanStep): AppliedChange {
 				kind: "service",
 				action: "create",
 				identifier: "aiGateway",
-				details: { branchName: step.branchName },
 			};
 	}
 }
@@ -574,12 +555,6 @@ async function applyStep(
 				kind: "service",
 				action: "create",
 				identifier: "auth",
-				details: {
-					branchName: step.branchName,
-					...(step.databaseName
-						? { databaseName: step.databaseName }
-						: {}),
-				},
 			};
 		}
 		case "enable-data-api": {
@@ -592,10 +567,6 @@ async function applyStep(
 				kind: "service",
 				action: "create",
 				identifier: "dataApi",
-				details: {
-					branchName: step.branchName,
-					databaseName: step.databaseName,
-				},
 			};
 		}
 		case "create-bucket": {
@@ -609,7 +580,6 @@ async function applyStep(
 				action: "create",
 				identifier: `bucket:${step.bucketName}`,
 				details: {
-					branchName: step.branchName,
 					bucketName: step.bucketName,
 					accessLevel: step.accessLevel,
 				},
@@ -626,7 +596,6 @@ async function applyStep(
 				action: "create",
 				identifier: `function:${step.fn.slug}`,
 				details: {
-					branchName: step.branchName,
 					slug: step.fn.slug,
 					name: step.fn.name,
 				},
@@ -649,7 +618,6 @@ async function applyStep(
 				action: "update",
 				identifier: `function:${step.fn.slug}`,
 				details: {
-					branchName: step.branchName,
 					slug: step.fn.slug,
 					source: step.fn.source,
 					runtime: step.fn.runtime,
@@ -663,7 +631,6 @@ async function applyStep(
 				kind: "service",
 				action: "create",
 				identifier: "aiGateway",
-				details: { branchName: step.branchName },
 			};
 		}
 	}
