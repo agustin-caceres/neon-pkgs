@@ -266,6 +266,18 @@ export async function pushConfig(
 		applied.push(change);
 	}
 
+	// Surface each deployed function's invocation URL on its applied change so callers
+	// (e.g. neonctl) can show users where to call it right after a push.
+	await enrichFunctionInvocationUrls({
+		api,
+		projectId: remoteProject.id,
+		branchId: branch.id,
+		plan: diff.plan,
+		applied,
+		preview: remote.preview,
+		dryRun,
+	});
+
 	const result: PushResult = {
 		projectId: remoteProject.id,
 		branchId: branch.id,
@@ -324,56 +336,29 @@ function synthesizeAppliedChange(step: PlanStep): AppliedChange {
 				},
 			};
 		case "enable-auth":
-			return {
-				kind: "service",
-				action: "create",
-				identifier: "auth",
-				details: {
-					branchName: step.branchName,
-					...(step.databaseName
-						? { databaseName: step.databaseName }
-						: {}),
-				},
-			};
+			// Pure branch on/off toggle: the target branch is redundant (same on
+			// every row) and the database is auto-derived, not policy-chosen — so
+			// there is nothing meaningful to surface in the change summary.
+			return { kind: "service", action: "create", identifier: "auth" };
 		case "enable-data-api":
-			return {
-				kind: "service",
-				action: "create",
-				identifier: "dataApi",
-				details: {
-					branchName: step.branchName,
-					databaseName: step.databaseName,
-				},
-			};
+			return { kind: "service", action: "create", identifier: "dataApi" };
 		case "create-bucket":
 			return {
 				kind: "service",
 				action: "create",
 				identifier: `bucket:${step.bucketName}`,
 				details: {
-					branchName: step.branchName,
 					bucketName: step.bucketName,
 					accessLevel: step.accessLevel,
-				},
-			};
-		case "create-function":
-			return {
-				kind: "service",
-				action: "create",
-				identifier: `function:${step.fn.slug}`,
-				details: {
-					branchName: step.branchName,
-					slug: step.fn.slug,
-					name: step.fn.name,
 				},
 			};
 		case "deploy-function":
 			return {
 				kind: "service",
-				action: "update",
+				// The first deployment creates the function; a later one updates it.
+				action: step.functionExists ? "update" : "create",
 				identifier: `function:${step.fn.slug}`,
 				details: {
-					branchName: step.branchName,
 					slug: step.fn.slug,
 					source: step.fn.source,
 					runtime: step.fn.runtime,
@@ -384,7 +369,6 @@ function synthesizeAppliedChange(step: PlanStep): AppliedChange {
 				kind: "service",
 				action: "create",
 				identifier: "aiGateway",
-				details: { branchName: step.branchName },
 			};
 	}
 }
@@ -574,12 +558,6 @@ async function applyStep(
 				kind: "service",
 				action: "create",
 				identifier: "auth",
-				details: {
-					branchName: step.branchName,
-					...(step.databaseName
-						? { databaseName: step.databaseName }
-						: {}),
-				},
 			};
 		}
 		case "enable-data-api": {
@@ -592,10 +570,6 @@ async function applyStep(
 				kind: "service",
 				action: "create",
 				identifier: "dataApi",
-				details: {
-					branchName: step.branchName,
-					databaseName: step.databaseName,
-				},
 			};
 		}
 		case "create-bucket": {
@@ -609,31 +583,15 @@ async function applyStep(
 				action: "create",
 				identifier: `bucket:${step.bucketName}`,
 				details: {
-					branchName: step.branchName,
 					bucketName: step.bucketName,
 					accessLevel: step.accessLevel,
 				},
 			};
 		}
-		case "create-function": {
-			await ctx.api.createBranchFunction(
-				ctx.remoteProjectId,
-				step.branchId,
-				{ slug: step.fn.slug, name: step.fn.name },
-			);
-			return {
-				kind: "service",
-				action: "create",
-				identifier: `function:${step.fn.slug}`,
-				details: {
-					branchName: step.branchName,
-					slug: step.fn.slug,
-					name: step.fn.name,
-				},
-			};
-		}
 		case "deploy-function": {
 			const bundle = await ctx.bundleFunction(step.fn);
+			// Neon creates the function on its first deployment — there is no separate
+			// create call — so a single deploy both creates (when absent) and ships code.
 			const deployment = await ctx.api.deployBranchFunction(
 				ctx.remoteProjectId,
 				step.branchId,
@@ -646,10 +604,9 @@ async function applyStep(
 			);
 			return {
 				kind: "service",
-				action: "update",
+				action: step.functionExists ? "update" : "create",
 				identifier: `function:${step.fn.slug}`,
 				details: {
-					branchName: step.branchName,
 					slug: step.fn.slug,
 					source: step.fn.source,
 					runtime: step.fn.runtime,
@@ -663,8 +620,72 @@ async function applyStep(
 				kind: "service",
 				action: "create",
 				identifier: "aiGateway",
-				details: { branchName: step.branchName },
 			};
 		}
 	}
+}
+
+/**
+ * Add each deployed function's invocation URL to its applied-change `details` so callers
+ * (e.g. neonctl) can show users where to call the function right after a push.
+ *
+ * The URL is read from the preview snapshot already fetched for the diff, which lists every
+ * existing function with its `invocationUrl`. A function created by its *first* deployment in
+ * this push is not in that snapshot, so when one is present we re-list the branch's functions
+ * once to learn its freshly-minted URL. Skipped on dry-run (nothing was created) and
+ * best-effort otherwise: a failed re-list omits the URL rather than failing a push that has
+ * already applied.
+ */
+async function enrichFunctionInvocationUrls(args: {
+	api: NeonApi;
+	projectId: string;
+	branchId: string;
+	plan: PlanStep[];
+	applied: AppliedChange[];
+	preview: RemotePreviewState | undefined;
+	dryRun: boolean;
+}): Promise<void> {
+	const { api, projectId, branchId, plan, applied, preview, dryRun } = args;
+	const deployedSlugs = plan.flatMap((step) =>
+		step.kind === "deploy-function" ? [step.fn.slug] : [],
+	);
+	if (deployedSlugs.length === 0) return;
+
+	const urlBySlug = new Map<string, string>(
+		(preview?.functions ?? []).map(
+			(fn) => [fn.slug, fn.invocationUrl] as const,
+		),
+	);
+
+	// A first-time deploy creates the function, so its URL isn't in the pre-fetch; re-list
+	// once when any deployed slug is still missing a URL.
+	const hasMissingUrl = deployedSlugs.some((slug) => !urlBySlug.has(slug));
+	if (hasMissingUrl && !dryRun) {
+		try {
+			for (const fn of await api.listBranchFunctions(
+				projectId,
+				branchId,
+			)) {
+				urlBySlug.set(fn.slug, fn.invocationUrl);
+			}
+		} catch {
+			// Push already succeeded; surface what we can rather than failing here.
+		}
+	}
+
+	for (const change of applied) {
+		const slug = functionSlugFromIdentifier(change.identifier);
+		if (slug === undefined) continue;
+		const invocationUrl = urlBySlug.get(slug);
+		if (invocationUrl === undefined) continue;
+		change.details = { ...change.details, invocationUrl };
+	}
+}
+
+/** Pull the function slug out of a `function:<slug>` applied-change identifier. */
+function functionSlugFromIdentifier(identifier: string): string | undefined {
+	const prefix = "function:";
+	return identifier.startsWith(prefix)
+		? identifier.slice(prefix.length)
+		: undefined;
 }

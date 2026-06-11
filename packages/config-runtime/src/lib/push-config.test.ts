@@ -90,6 +90,35 @@ describe("pushConfig", () => {
 		).toBe(true);
 	});
 
+	test("auth/dataApi changes carry no redundant details (target branch / derived db)", async () => {
+		const config = defineConfig({ auth: {}, dataApi: {} });
+
+		// Plan (dry-run) and live apply must agree on the trimmed shape: these are
+		// plain branch toggles, so the auto-derived database and the (constant)
+		// target branch are not surfaced as change "details".
+		const plan = await pushConfig(config, {
+			...seededFake(),
+			branchId: "br-main",
+			dryRun: true,
+		});
+		const applied = await pushConfig(config, {
+			...seededFake(),
+			branchId: "br-main",
+			updateExisting: true,
+		});
+
+		for (const result of [plan, applied]) {
+			const auth = result.applied.find((c) => c.identifier === "auth");
+			const dataApi = result.applied.find(
+				(c) => c.identifier === "dataApi",
+			);
+			expect(auth).toBeDefined();
+			expect(dataApi).toBeDefined();
+			expect(auth?.details).toBeUndefined();
+			expect(dataApi?.details).toBeUndefined();
+		}
+	});
+
 	test("reports mutable branch drift as conflict without updateExisting", async () => {
 		const { api, projectId } = seededFake();
 		const config = defineConfig({
@@ -315,11 +344,6 @@ describe("pushConfig", () => {
 				}),
 				expect.objectContaining({
 					kind: "service",
-					action: "update",
-					identifier: "function:fn1",
-				}),
-				expect.objectContaining({
-					kind: "service",
 					action: "create",
 					identifier: "aiGateway",
 				}),
@@ -391,7 +415,7 @@ describe("pushConfig", () => {
 		expect(Array.from(input)).toEqual([1, 2, 3, 4]);
 	});
 
-	test("re-deploys an existing function but does not recreate it", async () => {
+	test("re-deploys an existing function as an update, without duplicating it", async () => {
 		const { api, projectId } = seededFake();
 		api.seedFunction(projectId, "br-main", {
 			id: "fn-existing",
@@ -405,13 +429,82 @@ describe("pushConfig", () => {
 			},
 		});
 
-		await pushConfig(config, { api, projectId, branchId: "br-main" });
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
 
-		expect(
-			api.history.filter((h) => h.method === "createBranchFunction"),
-		).toHaveLength(0);
+		// A single deploy ships the new code; the function is not recreated.
 		expect(
 			api.history.filter((h) => h.method === "deployBranchFunction"),
+		).toHaveLength(1);
+		expect(result.applied).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "service",
+					action: "update",
+					identifier: "function:fn1",
+				}),
+			]),
+		);
+		// Still exactly one function on the branch (no duplicate created).
+		const functions = await api.listBranchFunctions(projectId, "br-main");
+		expect(functions.map((f) => f.slug)).toEqual(["fn1"]);
+	});
+
+	test("surfaces a first-deployed function's invocation URL in the applied details", async () => {
+		const { api, projectId } = seededFake();
+		const config = defineConfig({
+			preview: {
+				functions: { fn1: { name: "Hello World", source: fnSource } },
+			},
+		});
+
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
+
+		const change = result.applied.find(
+			(c) => c.identifier === "function:fn1",
+		);
+		// The function is created on its first deploy, so its URL is not in the pre-fetched
+		// preview snapshot; pushConfig re-lists the branch's functions to learn it.
+		expect(change?.details?.invocationUrl).toBe(
+			"https://br-main.fake.neon.tech/functions/fn1",
+		);
+	});
+
+	test("reuses the pre-fetched URL for an existing function (no redundant re-list)", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-existing",
+			slug: "fn1",
+			name: "Hello World",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		const config = defineConfig({
+			preview: {
+				functions: { fn1: { name: "Hello World", source: fnSource } },
+			},
+		});
+
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
+
+		const change = result.applied.find(
+			(c) => c.identifier === "function:fn1",
+		);
+		expect(change?.details?.invocationUrl).toBe("https://x/functions/fn1");
+		// The diff already fetched the function list, so the URL is known without a second
+		// read: exactly one `listBranchFunctions` call (the pre-fetch).
+		expect(
+			api.history.filter((h) => h.method === "listBranchFunctions"),
 		).toHaveLength(1);
 	});
 
