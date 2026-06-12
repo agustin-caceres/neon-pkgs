@@ -10,6 +10,7 @@
 | `@neondatabase/config`               | Config-as-Code for Neon: `defineConfig` types + the pure diff engine and Neon API adapter behind a `neon.ts` policy. | active     |
 | `@neondatabase/config-runtime`       | Runtime for `neon.ts` policies — `inspect` / `plan` / `apply` (push/pull) plus function bundling and deploy. | active     |
 | `@neondatabase/env`                  | Resolve and inject a branch's Neon env (`fetchEnv` / `parseEnv`, `neon-env run`) from a `neon.ts` policy. | active     |
+| `neoncli`                            | Name-claim package that redirects to the official Neon CLI, [`neonctl`](https://www.npmjs.com/package/neonctl). | active     |
 | `get-db`                             | alias for `neon-new`                                                          | deprecated |
 | `vite-plugin-db`                     | alias for `vite-plugin-neon-new`                                              | deprecated |
 | `neondb`                             | alias for `neon-new`                                                          | deprecated |
