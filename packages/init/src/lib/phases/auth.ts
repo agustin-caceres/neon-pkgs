@@ -3,8 +3,9 @@ import { neonctlCmd } from "../neonctl.js";
 import type { PhaseResponse } from "../types.js";
 
 function getSignupUrl(): string {
-	const base = process.env.NEON_API_HOST?.replace(/\/+$/, "");
-	return base ? `${base}/signup` : "https://console.neon.tech/signup";
+	return process.env.NEON_API_HOST
+		? `${new URL(process.env.NEON_API_HOST).origin}/signup`
+		: "https://console.neon.tech/signup";
 }
 
 function getSignupCommands(): Record<string, string> {
@@ -150,6 +151,8 @@ export async function handleAuthPhase(
 		status: "required",
 		nextAction: {
 			type: "ask_user",
+			instructions:
+				"IMPORTANT: You MUST present this question to the user and WAIT for their response before proceeding. Do NOT assume the answer or auto-select an option. The user's answer determines the next step.",
 			question:
 				"Do you have an existing Neon account, or do you need to create one?",
 			options: [

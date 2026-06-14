@@ -256,7 +256,7 @@ async function interactiveInitInner(
 	const skillsAlready =
 		inspection.skillsInstalled === true || selectedTemplate !== null;
 	const hasNeonConnection = inspection.connectionString === true;
-	const needsMcp = !mcpAlready;
+	let needsMcp = !mcpAlready;
 	const needsSkills = !skillsAlready;
 	const needsInstall = needsMcp || needsSkills;
 
@@ -327,7 +327,7 @@ async function interactiveInitInner(
 		if (isCancel(authResult) || authResult === "no") {
 			outro(
 				dim(
-					"Your project is configured with Neon. You can set up Neon Auth later by having your agent run: neon-init neon-auth --agent --json",
+					`Your project is configured with Neon. You can set up Neon Auth later by having your agent run: neonctl init --agent --json --data '{"step":"neon-auth"}'`,
 				),
 			);
 			return;
@@ -415,7 +415,7 @@ async function interactiveInitInner(
 		if (doInstallExtension) hintParts.push("editor extension");
 
 		// Installation preferences
-		let mcpScope: "global" | "project" = "global";
+		let mcpScope: "global" | "project" | "none" = "global";
 		let skillsScope: "global" | "project" = "project";
 
 		let modeResult: string;
@@ -488,13 +488,18 @@ async function interactiveInitInner(
 							value: "project",
 							label: "Project-level (this project only)",
 						},
+						{
+							value: "none",
+							label: "Skip — do not install the MCP server",
+						},
 					],
 				});
 				if (isCancel(scopeResult)) {
 					outro("Setup cancelled.");
 					return;
 				}
-				mcpScope = scopeResult as "global" | "project";
+				mcpScope = scopeResult as "global" | "project" | "none";
+				if (mcpScope === "none") needsMcp = false;
 			}
 
 			if (needsSkills) {
@@ -647,13 +652,10 @@ async function interactiveInitInner(
 		gettingStartedData.features = selectedFeatures;
 	if (options.preview) gettingStartedData.preview = true;
 
-	const dataJson = JSON.stringify(gettingStartedData);
-
 	// Build a prompt for the user to paste into their agent chat
-	const apiHost = process.env.NEON_API_HOST;
-	const envPrefix = apiHost ? `NEON_API_HOST=${apiHost} ` : "";
-	const cmd = `${envPrefix}neon-init getting-started --agent --json --data '${dataJson}'`;
-	const cols = process.stdout.columns || 80;
+	const cmd = `neonctl init --agent --json --data '${JSON.stringify({ step: "getting-started", ...gettingStartedData })}'`;
+	// Account for clack's "│  " prefix (3 chars) when wrapping
+	const cols = (process.stdout.columns || 80) - 3;
 	const promptText = `To finish setting up Neon using Neon's agent-guided onboarding experience, have your agent run this shell command: ${cmd}`;
 
 	log.step("Next steps");

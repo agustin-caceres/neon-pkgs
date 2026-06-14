@@ -40,8 +40,10 @@ const agentOption = {
 // Output helper
 // ---------------------------------------------------------------------------
 
+import { enrichResponse } from "./lib/enrich-output.js";
+
 function outputJson(data: unknown): void {
-	console.log(JSON.stringify(data, null, 2));
+	console.log(JSON.stringify(enrichResponse(data), null, 2));
 }
 
 /**
@@ -55,16 +57,15 @@ function resolveAgent(explicit: string | undefined): string | undefined {
 /**
  * Detects if an AI agent is invoking the CLI programmatically.
  *
- * Uses two signals:
- * 1. Agent-specific env vars (CLAUDECODE, CODEX, CLINE) — unambiguous.
- * 2. IDE env vars (TERM_PROGRAM=cursor) + non-TTY stdin — an IDE terminal
- *    where stdin is piped means an agent spawned us via execa/subprocess.
- *    A human typing in the same terminal would have isTTY=true.
+ * Agent-specific env vars (CLAUDECODE, CODEX, CLINE) are unambiguous.
+ * For IDE-based agents (Cursor, VS Code, Windsurf), we require non-TTY
+ * stdin to distinguish "agent spawned this" from "human typed this in
+ * the IDE's integrated terminal".
  */
 function detectAgentInvocation(): string | null {
 	const env = process.env;
 
-	// Agent-specific env vars (always definitive)
+	// Agent-specific env vars (always definitive, regardless of TTY)
 	if (
 		env.CLAUDECODE === "1" ||
 		env.CLAUDE_CODE === "1" ||
@@ -75,9 +76,9 @@ function detectAgentInvocation(): string | null {
 	if (env.CLINE === "1") return "cline";
 
 	// IDE detected + non-interactive stdin = agent spawned us
+	// (a human typing in the same terminal would have isTTY=true)
 	if (!process.stdin.isTTY) {
-		const ide = detectAgent();
-		if (ide) return ide;
+		return detectAgent();
 	}
 
 	return null;
@@ -101,6 +102,11 @@ const cli = yargs(hideBin(process.argv))
 			y
 				.options(jsonOption)
 				.options(agentOption)
+				.option("data", {
+					type: "string",
+					description:
+						'JSON object with a "step" field to route to a specific phase (auth, db, setup, getting-started, mcp, skills, migrations, neon-auth, status, finalize) and phase-specific options.',
+				})
 				.option("skip-neon-auth", {
 					type: "boolean",
 					default: false,
@@ -124,6 +130,29 @@ const cli = yargs(hideBin(process.argv))
 			);
 			const jsonMode =
 				argv.json || argv.agent !== undefined || detectedAgent !== null;
+
+			// --data with a "step" field routes to the appropriate phase
+			if (argv.data && jsonMode) {
+				const { routeDataStep } = await import(
+					"./lib/route-command.js"
+				);
+				let data: Record<string, unknown>;
+				try {
+					data = JSON.parse(argv.data);
+				} catch {
+					console.error(
+						"Invalid JSON in --data flag. Expected a JSON object.",
+					);
+					process.exit(1);
+					return;
+				}
+				if (typeof data.step === "string") {
+					const result = await routeDataStep(data, agent);
+					outputJson(result);
+					process.exit(0);
+					return;
+				}
+			}
 
 			if (jsonMode) {
 				// v2: agent-driven state machine

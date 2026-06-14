@@ -34,7 +34,7 @@ export async function ensureNeonctlAuth(
 		if (!quiet) {
 			if (msg.includes("interactive auth") || msg.includes("CI")) {
 				log.error(
-					"Auth requires an interactive terminal. Run neon-init in your system terminal (outside the chat) to sign in.",
+					"Auth requires an interactive terminal. Run neonctl init in your system terminal (outside the chat) to sign in.",
 				);
 			} else {
 				log.error(`Authentication failed: ${msg}`);
@@ -99,7 +99,7 @@ export async function createApiKeyFromNeonctl(
 
 		// Call Neon API to create an API key
 		const apiBase = process.env.NEON_API_HOST
-			? `${process.env.NEON_API_HOST.replace(/\/+$/, "")}/api/v2`
+			? `${new URL(process.env.NEON_API_HOST).origin}/api/v2`
 			: "https://console.neon.tech/api/v2";
 		const response = await fetch(`${apiBase}/api_keys`, {
 			method: "POST",
