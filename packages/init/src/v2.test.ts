@@ -128,8 +128,15 @@ describe("v2 orchestrator", () => {
 			// Should include template preference before mode
 			const prefs = result.nextAction.userPreferences ?? [];
 			expect(prefs[0]?.id).toBe("template");
-			// Should NOT include skillsScope (template bundles skills)
-			expect(prefs.find((p) => p.id === "skillsScope")).toBeUndefined();
+			// skillsScope is present but conditional on customize mode
+			// (if user picks a template, skills are bundled; if not, they need scope choice)
+			const skillsPref = prefs.find((p) => p.id === "skillsScope");
+			if (skillsPref) {
+				expect(skillsPref.condition).toEqual({
+					preferenceId: "mode",
+					equals: "customize",
+				});
+			}
 		}
 	});
 
@@ -174,7 +181,7 @@ describe("v2 orchestrator", () => {
 		expect(result.nextAction.type).toBe("agent_action");
 	});
 
-	test("skips setup and getting-started when fully configured, goes to neon_auth", async () => {
+	test("skips setup and getting-started when fully configured, goes to migrations", async () => {
 		mockIsAuthenticated.mockResolvedValue(true);
 		mockToolingInstalled({
 			".env": "DATABASE_URL=postgres://user:pass@ep-foo.us-east-2.aws.neon.tech/neondb",
@@ -183,11 +190,11 @@ describe("v2 orchestrator", () => {
 
 		const result = await orchestrate({ agent: "cursor" });
 
-		expect(result.phase).toBe("neon_auth");
-		expect(result.nextAction.type).toBe("ask_user");
+		// With no features set, neon_auth is skipped, goes to migrations
+		expect(result.phase).toBe("migrations");
 	});
 
-	test("skips neon_auth when --skip-neon-auth is set", async () => {
+	test("skips neon_auth when features are empty", async () => {
 		mockIsAuthenticated.mockResolvedValue(true);
 		mockToolingInstalled({
 			".env": "DATABASE_URL=postgres://user:pass@ep-foo.us-east-2.aws.neon.tech/neondb",
@@ -196,7 +203,6 @@ describe("v2 orchestrator", () => {
 
 		const result = await orchestrate({
 			agent: "claude",
-			skipNeonAuth: true,
 		});
 
 		expect(result.phase).toBe("migrations");

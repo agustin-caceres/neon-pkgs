@@ -12,12 +12,14 @@ export async function handleStatusPhase(
 	const authed = await isAuthenticated();
 
 	const inspection = await inspectProject([
+		{ id: "mcp_server", description: "", lookFor: [] },
 		{ id: "database_url", description: "", lookFor: [] },
 		{ id: "skills", description: "", lookFor: [] },
 		{ id: "migrations", description: "", lookFor: [] },
 	]);
 
 	const hasDatabaseUrl = inspection.databaseUrl === true;
+	const mcpConfigured = inspection.mcpConfigured === true;
 	const skillsInstalled = inspection.skillsInstalled === true;
 	const migrationTool = (inspection.migrationTool as string | null) ?? null;
 	const hasMigrations =
@@ -31,7 +33,7 @@ export async function handleStatusPhase(
 		recommendations.push({
 			priority: "high",
 			message: "Not authenticated with Neon",
-			command: `neonctl init --agent --json --data '{"step":"auth"}'`,
+			command: `neonctl init --agent --data '{"step":"auth"}'`,
 		});
 	}
 
@@ -39,7 +41,7 @@ export async function handleStatusPhase(
 		recommendations.push({
 			priority: "high",
 			message: "No DATABASE_URL found in .env",
-			command: `neonctl init --agent --json --data '{"step":"db"}'`,
+			command: `neonctl init --agent --data '{"step":"db"}'`,
 		});
 	}
 
@@ -47,7 +49,7 @@ export async function handleStatusPhase(
 		recommendations.push({
 			priority: "medium",
 			message: "Neon agent skills not detected in this project",
-			command: `neonctl init --agent --json --data '{"step":"skills","install":true}'`,
+			command: `neonctl init --agent --data '{"step":"skills","install":true}'`,
 		});
 	}
 
@@ -55,7 +57,7 @@ export async function handleStatusPhase(
 		recommendations.push({
 			priority: "medium",
 			message: `${migrationTool} detected but no migrations found`,
-			command: `neonctl init --agent --json --data '{"step":"migrations"}'`,
+			command: `neonctl init --agent --data '{"step":"migrations"}'`,
 		});
 	}
 
@@ -64,8 +66,14 @@ export async function handleStatusPhase(
 			authenticated: authed,
 		},
 		tooling: {
-			mcpServer: { configured: null },
-			skills: { installed: skillsInstalled },
+			mcpServer: {
+				configured: mcpConfigured,
+				scope: inspection.mcpScope || null,
+			},
+			skills: {
+				installed: skillsInstalled,
+				scope: inspection.skillsScope || null,
+			},
 		},
 		project: {
 			databaseUrl: hasDatabaseUrl,

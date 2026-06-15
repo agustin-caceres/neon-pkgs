@@ -12,7 +12,6 @@ import type { PhaseResponse } from "./lib/types.js";
 
 export interface OrchestratorOptions {
 	agent?: string;
-	skipNeonAuth?: boolean;
 	skipMigrations?: boolean;
 	/** Enable preview features (e.g. project bootstrapping from templates) */
 	preview?: boolean;
@@ -58,8 +57,40 @@ export async function orchestrate(
 
 	// Only detect empty projects when --preview is enabled
 	const hasApp = options.preview ? inspection.hasApp === true : true;
-	const toolingInstalled =
-		inspection.mcpConfigured && inspection.skillsInstalled;
+
+	// When preview is enabled, check that all preview skills are installed too
+	let skillsInstalled = inspection.skillsInstalled;
+	if (options.preview && skillsInstalled && inspection.skillsScope) {
+		const { getSkillList } = await import("./lib/skills.js");
+		const previewSkills = getSkillList(true);
+		const { existsSync: exists } = await import("node:fs");
+		const { resolve: resolvePath } = await import("node:path");
+		const home = process.env.HOME || process.env.USERPROFILE || "";
+		const scope = inspection.skillsScope;
+		const dirs =
+			scope === "project"
+				? [
+						resolvePath(cwd, ".cursor", "skills"),
+						resolvePath(cwd, ".claude", "skills"),
+						resolvePath(cwd, ".agents", "skills"),
+					]
+				: [
+						resolvePath(home, ".cursor", "skills"),
+						resolvePath(home, ".claude", "skills"),
+						resolvePath(home, ".agents", "skills"),
+					];
+		const allPresent = previewSkills.every((skill) =>
+			dirs.some((dir) => exists(resolvePath(dir, skill, "SKILL.md"))),
+		);
+		if (!allPresent) {
+			skillsInstalled = false;
+			// Mark as partial so setup auto-completes to the same scope
+			inspection.skillsScope =
+				`${inspection.skillsScope}-partial` as typeof inspection.skillsScope;
+		}
+	}
+
+	const toolingInstalled = inspection.mcpConfigured && skillsInstalled;
 	const hasNeonConnection = inspection.connectionString === true;
 
 	// Phase 3a: No app or tooling not installed → setup flow
@@ -67,7 +98,15 @@ export async function orchestrate(
 	// Clean up any stale _init state from a previous run.
 	if (!hasApp || !toolingInstalled) {
 		cleanupInitState(resolve(cwd, ".neon"));
-		return handleSetupPhase({ agent: options.agent, hasApp });
+		return handleSetupPhase({
+			agent: options.agent,
+			preview: options.preview,
+			hasApp,
+			mcpConfigured: inspection.mcpConfigured ?? null,
+			mcpScope: inspection.mcpScope || undefined,
+			skillsInstalled: skillsInstalled ?? null,
+			skillsScope: inspection.skillsScope || undefined,
+		});
 	}
 
 	// Read .neon context early — needed for feature-based routing
@@ -115,19 +154,13 @@ export async function orchestrate(
 		}
 	}
 
-	// Phase 4: Neon Auth — skip if template/user doesn't require it
-	const hasFeatureRequirements = features.length > 0;
-	const needsAuth = hasFeatureRequirements
-		? features.includes("auth")
-		: !options.skipNeonAuth;
-	if (needsAuth) {
+	// Phase 4: Neon Auth — only if features include "auth"
+	if (features.includes("auth")) {
 		const hasNeonAuth = checkNeonAuth(cwd);
 		if (!hasNeonAuth) {
-			// If auth was already selected via features, go straight to setup
-			// (don't re-ask the user)
 			return handleNeonAuthPhase({
 				agent: options.agent,
-				setup: hasFeatureRequirements,
+				setup: true,
 			});
 		}
 	}

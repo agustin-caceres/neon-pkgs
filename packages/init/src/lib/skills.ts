@@ -1,10 +1,45 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { log, spinner } from "@clack/prompts";
 import { execa } from "execa";
 import { dim } from "yoctocolors";
 import { getSkillsAgentName as getSkillsAgentNameFromId } from "./agents.js";
 import type { Editor } from "./types.js";
+
+/**
+ * Ensures the `skills` CLI is globally installed so npx doesn't need
+ * to download it (which can fail behind corporate proxies / sandboxes).
+ */
+async function ensureSkillsCli(): Promise<void> {
+	try {
+		await execa("skills", ["--version"], { stdio: "pipe", timeout: 5000 });
+	} catch {
+		// Not installed — install it globally
+		try {
+			await execa("npm", ["install", "-g", "skills"], {
+				stdio: "pipe",
+				timeout: 60000,
+			});
+		} catch {
+			// Best effort — npx will fall back to downloading
+		}
+	}
+}
+
+/** Base skills installed for all invocations */
+const BASE_SKILLS = ["neon", "neon-postgres"];
+
+/** Additional skills installed for preview (non-bootstrap) invocations */
+const PREVIEW_SKILLS = [
+	"neon-object-storage",
+	"neon-functions",
+	"neon-ai-gateway",
+];
+
+/** Returns the skill list based on whether preview mode is active */
+export function getSkillList(preview?: boolean): string[] {
+	return preview ? [...BASE_SKILLS, ...PREVIEW_SKILLS] : BASE_SKILLS;
+}
 
 const SKILL_BASE_URL =
 	"https://neon.com/docs/ai/skills/neon-postgres/references";
@@ -76,6 +111,7 @@ function editorToSkillsAgent(editor: Editor): string {
 export interface InstallSkillsOptions {
 	json?: boolean;
 	scope?: "global" | "project";
+	preview?: boolean;
 }
 
 /**
@@ -100,34 +136,40 @@ export async function installAgentSkills(
 
 	let anyFailed = false;
 
+	await ensureSkillsCli();
+	const skills = getSkillList(options?.preview);
+
 	for (const editor of editorsWithSkills) {
 		const agentName = editorToSkillsAgent(editor);
 
-		try {
-			await execa(
-				"npx",
-				[
+		// Install one skill at a time — the skills CLI has a bug with multiple
+		// --skill flags where it creates directories but doesn't copy all SKILL.md files.
+		for (const skill of skills) {
+			try {
+				await execa(
 					"skills",
-					"add",
-					"neondatabase/agent-skills",
-					"--skill",
-					"neon-postgres",
-					"--agent",
-					agentName,
-					...(options?.scope === "global" ? ["-g"] : []),
-					"-y",
-				],
-				{
-					stdio: "pipe",
-					timeout: 10000,
-				},
-			);
-		} catch (error) {
-			if (!quiet)
-				log.error(
-					`Failed to install agent skills for ${editor}: ${error instanceof Error ? error.message : "Unknown error"}`,
+					[
+						"add",
+						"neondatabase/agent-skills",
+						"--skill",
+						skill,
+						"--agent",
+						agentName,
+						...(options?.scope === "global" ? ["-g"] : []),
+						"-y",
+					],
+					{
+						stdio: "pipe",
+						timeout: 120000,
+					},
 				);
-			anyFailed = true;
+			} catch (error) {
+				if (!quiet)
+					log.error(
+						`Failed to install skill ${skill} for ${editor}: ${error instanceof Error ? error.message : "Unknown error"}`,
+					);
+				anyFailed = true;
+			}
 		}
 	}
 
@@ -137,7 +179,7 @@ export async function installAgentSkills(
 		);
 		if (!quiet)
 			log.info(
-				"You can manually install skills by running: npx skills add neondatabase/agent-skills --skill neon-postgres",
+				"You can manually install skills by running: npx skills add neondatabase/agent-skills --skill neon --skill neon-postgres",
 			);
 		return false;
 	}
@@ -158,12 +200,14 @@ const SKILLS_FRESHNESS_MS = 12 * 60 * 60 * 1000; // 12 hours
  */
 const GLOBAL_SKILLS_DIRS: Record<string, string[]> = (() => {
 	const home = process.env.HOME || process.env.USERPROFILE || "";
+	// .agents/skills is the generic directory used by multiple agents
+	const agentsDir = resolve(home, ".agents", "skills");
 	return {
-		cursor: [resolve(home, ".cursor", "skills")],
-		"claude-code": [resolve(home, ".claude", "skills")],
-		"github-copilot": [resolve(home, ".vscode", "skills")],
-		codex: [resolve(home, ".codex", "skills")],
-		cline: [resolve(home, ".cline", "skills")],
+		cursor: [resolve(home, ".cursor", "skills"), agentsDir],
+		"claude-code": [resolve(home, ".claude", "skills"), agentsDir],
+		"github-copilot": [resolve(home, ".vscode", "skills"), agentsDir],
+		codex: [resolve(home, ".codex", "skills"), agentsDir],
+		cline: [resolve(home, ".cline", "skills"), agentsDir],
 	};
 })();
 
@@ -171,62 +215,43 @@ const GLOBAL_SKILLS_DIRS: Record<string, string[]> = (() => {
  * Checks whether skills were recently updated (within the freshness window).
  * Checks both project-level (skills-lock.json mtime) and global (skills dir mtime).
  */
-function skillsAreFresh(agent: string): boolean {
+function skillsAreFresh(agent: string, requiredSkills: string[]): boolean {
 	const now = Date.now();
 	const cwd = process.cwd();
+	const projectSkillDirs = [".agents", ".cursor", ".claude"];
 
-	// Check project-level: skills-lock.json must reference neon-postgres
-	// AND the skill file must actually exist on disk
+	// Check project-level: ALL required skills must exist on disk
+	// and skills-lock.json must be recent
 	const lockPath = resolve(cwd, "skills-lock.json");
 	if (existsSync(lockPath)) {
 		try {
-			const content = readFileSync(lockPath, "utf-8");
-			if (content.includes("neon-postgres")) {
-				// Verify the actual skill file exists (lock file can be stale)
-				const skillExists =
-					existsSync(
-						resolve(
-							cwd,
-							".agents",
-							"skills",
-							"neon-postgres",
-							"SKILL.md",
+			const mtime = statSync(lockPath).mtimeMs;
+			if (now - mtime < SKILLS_FRESHNESS_MS) {
+				const allExist = requiredSkills.every((skill) =>
+					projectSkillDirs.some((dir) =>
+						existsSync(
+							resolve(cwd, dir, "skills", skill, "SKILL.md"),
 						),
-					) ||
-					existsSync(
-						resolve(
-							cwd,
-							".cursor",
-							"skills",
-							"neon-postgres",
-							"SKILL.md",
-						),
-					) ||
-					existsSync(
-						resolve(
-							cwd,
-							".claude",
-							"skills",
-							"neon-postgres",
-							"SKILL.md",
-						),
-					);
-				if (skillExists) {
-					const mtime = statSync(lockPath).mtimeMs;
-					if (now - mtime < SKILLS_FRESHNESS_MS) return true;
-				}
+					),
+				);
+				if (allExist) return true;
 			}
 		} catch {}
 	}
 
-	// Check global: neon-postgres SKILL.md inside agent-specific skills directories
+	// Check global: ALL required skills must exist in agent-specific dirs
 	const agentName = getSkillsAgentNameFromId(agent);
 	const globalDirs = GLOBAL_SKILLS_DIRS[agentName] ?? [];
 	for (const dir of globalDirs) {
-		const neonSkillMd = resolve(dir, "neon-postgres", "SKILL.md");
-		if (existsSync(neonSkillMd)) {
+		const allExist = requiredSkills.every((skill) =>
+			existsSync(resolve(dir, skill, "SKILL.md")),
+		);
+		if (allExist) {
+			// Check freshness of any one skill file
 			try {
-				const mtime = statSync(neonSkillMd).mtimeMs;
+				const mtime = statSync(
+					resolve(dir, requiredSkills[0], "SKILL.md"),
+				).mtimeMs;
 				if (now - mtime < SKILLS_FRESHNESS_MS) return true;
 			} catch {}
 		}
@@ -243,31 +268,66 @@ function skillsAreFresh(agent: string): boolean {
  * since it's a no-op when skills are fresh.
  */
 export async function ensureSkillsUpToDate(
-	agent: string,
+	agent: string | undefined,
 	scope?: "global" | "project",
+	preview?: boolean,
 ): Promise<boolean> {
-	if (skillsAreFresh(agent)) return true;
+	const resolvedAgent = agent || "cursor";
+	const skills = getSkillList(preview);
+	if (skillsAreFresh(resolvedAgent, skills)) return true;
 
-	const agentName = getSkillsAgentNameFromId(agent);
-	try {
-		await execa(
-			"npx",
-			[
-				"-y",
+	await ensureSkillsCli();
+	const agentName = getSkillsAgentNameFromId(resolvedAgent);
+	let allOk = true;
+
+	// Only install skills that don't already have SKILL.md on disk.
+	// Re-installing existing skills can trigger sandbox permission prompts.
+	const home = process.env.HOME || process.env.USERPROFILE || "";
+	const cwd = process.cwd();
+	const checkDirs =
+		scope === "global"
+			? [
+					resolve(home, ".cursor", "skills"),
+					resolve(home, ".claude", "skills"),
+					resolve(home, ".agents", "skills"),
+				]
+			: [
+					resolve(cwd, ".cursor", "skills"),
+					resolve(cwd, ".claude", "skills"),
+					resolve(cwd, ".agents", "skills"),
+				];
+
+	const missingSkills = skills.filter(
+		(skill) =>
+			!checkDirs.some((dir) =>
+				existsSync(resolve(dir, skill, "SKILL.md")),
+			),
+	);
+
+	if (missingSkills.length === 0) return true;
+
+	// Install one skill at a time — the skills CLI has a bug with multiple
+	// --skill flags where it creates directories but doesn't copy all SKILL.md files.
+	for (const skill of missingSkills) {
+		try {
+			await execa(
 				"skills",
-				"add",
-				"neondatabase/agent-skills",
-				"--skill",
-				"neon-postgres",
-				"--agent",
-				agentName,
-				...(scope === "global" ? ["-g"] : []),
-				"-y",
-			],
-			{ stdio: "pipe", timeout: 60000 },
-		);
-		return true;
-	} catch {
-		return false;
+				[
+					"add",
+					"neondatabase/agent-skills",
+					"--skill",
+					skill,
+					"--agent",
+					agentName,
+					...(scope === "global" ? ["-g"] : []),
+					"-y",
+				],
+				{ stdio: "pipe", timeout: 120000 },
+			);
+		} catch {
+			allOk = false;
+		}
 	}
+
+	return allOk;
 }

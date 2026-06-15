@@ -7,10 +7,19 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentCheck } from "./types.js";
 
+export type DetectedScope =
+	| "global"
+	| "project"
+	| "global-partial"
+	| "project-partial"
+	| false;
+
 export interface InspectionResults {
 	[key: string]: unknown;
 	mcpConfigured?: boolean;
+	mcpScope?: DetectedScope;
 	skillsInstalled?: boolean;
+	skillsScope?: DetectedScope;
 	/** True if a Neon-specific connection string (DATABASE_URL with "neon" or PGHOST with "neon") is found */
 	connectionString?: boolean;
 	/** True if any DATABASE_URL is set in .env (regardless of provider) */
@@ -37,9 +46,12 @@ export async function inspectProject(
 
 	for (const check of checks) {
 		switch (check.id) {
-			case "mcp_server":
-				results.mcpConfigured = checkMcpServer(cwd);
+			case "mcp_server": {
+				const mcpScope = checkMcpServer(cwd);
+				results.mcpConfigured = mcpScope !== false;
+				results.mcpScope = mcpScope;
 				break;
+			}
 			case "connection_string":
 				results.connectionString = checkConnectionString(cwd);
 				break;
@@ -58,9 +70,12 @@ export async function inspectProject(
 				results.migrationDir = migrations.dir;
 				break;
 			}
-			case "skills":
-				results.skillsInstalled = checkSkillsInstalled(cwd);
+			case "skills": {
+				const skillsScope = checkSkillsInstalled(cwd);
+				results.skillsInstalled = skillsScope !== false;
+				results.skillsScope = skillsScope;
 				break;
+			}
 			case "ide_type":
 				results.isVscodeIde = checkVscodeIde();
 				break;
@@ -80,55 +95,47 @@ export async function inspectProject(
 // Individual check implementations
 // ---------------------------------------------------------------------------
 
-function checkMcpServer(cwd: string): boolean {
-	// Check project-level Cursor config
-	const cursorMcp = resolve(cwd, ".cursor", "mcp.json");
-	if (existsSync(cursorMcp)) {
-		try {
-			const content = readFileSync(cursorMcp, "utf-8");
-			if (content.includes("neon") || content.includes("mcp.neon.tech")) {
-				return true;
-			}
-		} catch {}
-	}
-
-	// Check global Cursor config
+function checkMcpServer(cwd: string): DetectedScope {
 	const home = process.env.HOME || process.env.USERPROFILE || "";
-	const globalCursorMcp = resolve(home, ".cursor", "mcp.json");
-	if (existsSync(globalCursorMcp)) {
-		try {
-			const content = readFileSync(globalCursorMcp, "utf-8");
-			if (content.includes("neon") || content.includes("mcp.neon.tech")) {
-				return true;
-			}
-		} catch {}
-	}
 
-	// Check Claude Code config (add-mcp writes to settings.local.json)
-	for (const claudeFile of ["settings.local.json", "settings.json"]) {
-		const claudeConfig = resolve(home, ".claude", claudeFile);
-		if (existsSync(claudeConfig)) {
+	// Check project-level configs first
+	const projectConfigs = [
+		resolve(cwd, ".cursor", "mcp.json"),
+		resolve(cwd, ".vscode", "settings.json"),
+	];
+	for (const configPath of projectConfigs) {
+		if (existsSync(configPath)) {
 			try {
-				const content = readFileSync(claudeConfig, "utf-8");
+				const content = readFileSync(configPath, "utf-8");
 				if (
 					content.includes("neon") ||
 					content.includes("mcp.neon.tech")
 				) {
-					return true;
+					return "project";
 				}
 			} catch {}
 		}
 	}
 
-	// Check VS Code settings
-	const vscodeSettings = resolve(cwd, ".vscode", "settings.json");
-	if (existsSync(vscodeSettings)) {
-		try {
-			const content = readFileSync(vscodeSettings, "utf-8");
-			if (content.includes("neon") || content.includes("mcp.neon.tech")) {
-				return true;
-			}
-		} catch {}
+	// Check global configs
+	const globalConfigs = [
+		resolve(home, ".cursor", "mcp.json"),
+		// Claude Code config (add-mcp writes to settings.local.json)
+		resolve(home, ".claude", "settings.local.json"),
+		resolve(home, ".claude", "settings.json"),
+	];
+	for (const configPath of globalConfigs) {
+		if (existsSync(configPath)) {
+			try {
+				const content = readFileSync(configPath, "utf-8");
+				if (
+					content.includes("neon") ||
+					content.includes("mcp.neon.tech")
+				) {
+					return "global";
+				}
+			} catch {}
+		}
 	}
 
 	return false;
@@ -247,31 +254,57 @@ function checkDatabaseUrl(cwd: string): boolean {
 	return false;
 }
 
-function checkSkillsInstalled(cwd: string): boolean {
+function checkSkillsInstalled(cwd: string): DetectedScope {
 	const home = process.env.HOME || process.env.USERPROFILE || "";
 
-	// Check for neon-postgres SKILL.md in known skill directories (project and global)
-	const skillsDirs = [
+	const skillNames = ["neon", "neon-postgres"];
+
+	// Check project-level skill directories — ALL base skills must exist
+	const projectDirs = [
 		resolve(cwd, ".cursor", "skills"),
 		resolve(cwd, ".claude", "skills"),
 		resolve(cwd, ".agents", "skills"),
-		resolve(home, ".cursor", "skills"),
-		resolve(home, ".claude", "skills"),
 	];
-	for (const dir of skillsDirs) {
-		// Verify the actual skill content file exists, not just the directory
-		const skillMd = resolve(dir, "neon-postgres", "SKILL.md");
-		if (existsSync(skillMd)) return true;
-	}
+	const allProjectSkills = skillNames.every((skill) =>
+		projectDirs.some((dir) => existsSync(resolve(dir, skill, "SKILL.md"))),
+	);
+	if (allProjectSkills) return "project";
 
 	// Check CLAUDE.md for neon skill references (injected by skills CLI)
+	// Only counts as installed if both skill names are referenced
 	const claudeMd = resolve(cwd, "CLAUDE.md");
 	if (existsSync(claudeMd)) {
 		try {
 			const content = readFileSync(claudeMd, "utf-8");
-			if (content.includes("neon-postgres")) return true;
+			if (
+				content.includes("neon-postgres") &&
+				content.includes("neon/SKILL.md")
+			)
+				return "project";
 		} catch {}
 	}
+
+	// Check global skill directories — ALL base skills must exist
+	const globalDirs = [
+		resolve(home, ".cursor", "skills"),
+		resolve(home, ".claude", "skills"),
+		resolve(home, ".agents", "skills"),
+	];
+	const allGlobalSkills = skillNames.every((skill) =>
+		globalDirs.some((dir) => existsSync(resolve(dir, skill, "SKILL.md"))),
+	);
+	if (allGlobalSkills) return "global";
+
+	// Check for partial installations — ANY skill exists
+	const anyProjectSkill = skillNames.some((skill) =>
+		projectDirs.some((dir) => existsSync(resolve(dir, skill, "SKILL.md"))),
+	);
+	if (anyProjectSkill) return "project-partial";
+
+	const anyGlobalSkill = skillNames.some((skill) =>
+		globalDirs.some((dir) => existsSync(resolve(dir, skill, "SKILL.md"))),
+	);
+	if (anyGlobalSkill) return "global-partial";
 
 	return false;
 }

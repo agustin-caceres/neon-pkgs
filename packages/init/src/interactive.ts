@@ -24,7 +24,7 @@ import {
 	fetchTemplates,
 	type NeonFeature,
 } from "./lib/bootstrap.js";
-import { detectAgent } from "./lib/detect-agent.js";
+import { detectAgent, detectIde } from "./lib/detect-agent.js";
 import { detectAvailableEditors } from "./lib/editors.js";
 import {
 	installExtension,
@@ -33,7 +33,7 @@ import {
 } from "./lib/extension.js";
 import { inspectProject } from "./lib/inspect.js";
 import { ensureNeonctl } from "./lib/neonctl.js";
-import { installAgentSkills } from "./lib/skills.js";
+import { ensureSkillsUpToDate, installAgentSkills } from "./lib/skills.js";
 import type { Editor } from "./lib/types.js";
 
 function wordWrap(text: string, width: number): string {
@@ -297,8 +297,16 @@ async function interactiveInitInner(
 
 	// If tooling + database are configured, check if there's anything left to do
 	if (mcpAlready && skillsAlready && hasNeonConnection && hasNeonContext) {
-		log.step(dim("Neon MCP server already configured ✓"));
-		log.step(dim("Neon agent skills already installed ✓"));
+		log.step(
+			dim(
+				`Neon MCP server already configured (${inspection.mcpScope || "detected"}) ✓`,
+			),
+		);
+		log.step(
+			dim(
+				`Neon agent skills already installed (${inspection.skillsScope || "detected"}) ✓`,
+			),
+		);
 		if (extensionAlready)
 			log.step(dim("Neon editor extension installed ✓"));
 		log.step(dim("Neon database connected ✓"));
@@ -327,7 +335,7 @@ async function interactiveInitInner(
 		if (isCancel(authResult) || authResult === "no") {
 			outro(
 				dim(
-					`Your project is configured with Neon. You can set up Neon Auth later by having your agent run: neonctl init --agent --json --data '{"step":"neon-auth"}'`,
+					`Your project is configured with Neon. You can set up Neon Auth later by having your agent run: neonctl init --agent --data '{"step":"neon-auth"}'`,
 				),
 			);
 			return;
@@ -352,8 +360,18 @@ async function interactiveInitInner(
 	}
 
 	// Log what's already in place
-	if (mcpAlready) log.step(dim("Neon MCP server already configured ✓"));
-	if (skillsAlready) log.step(dim("Neon agent skills already installed ✓"));
+	if (mcpAlready)
+		log.step(
+			dim(
+				`Neon MCP server already configured (${inspection.mcpScope || "detected"}) ✓`,
+			),
+		);
+	if (skillsAlready)
+		log.step(
+			dim(
+				`Neon agent skills already installed (${inspection.skillsScope || "detected"}) ✓`,
+			),
+		);
 
 	// -----------------------------------------------------------------------
 	// Step 3–5: Install what's missing (skip entirely if everything is configured)
@@ -615,7 +633,10 @@ async function interactiveInitInner(
 			}
 
 			if (needsSkills) {
-				await installAgentSkills([editor], { scope: skillsScope });
+				await installAgentSkills([editor], {
+					scope: skillsScope,
+					preview: options.preview,
+				});
 			}
 
 			if (doInstallExtension && usesExtension(editor)) {
@@ -631,6 +652,29 @@ async function interactiveInitInner(
 				}
 			}
 		}
+	}
+
+	// Ensure all required skills are present (fills in any missing ones).
+	// detectAgent() returns null in a human terminal (TTY), so fall back
+	// to IDE detection which works regardless of TTY.
+	const ide = detectIde();
+	const agentForSkills =
+		detectAgent() ??
+		(ide === "Cursor"
+			? "cursor"
+			: ide === "VS Code"
+				? "vscode"
+				: ide === "Windsurf"
+					? "windsurf"
+					: null);
+	if (agentForSkills) {
+		const detectedSkillsScope =
+			inspection.skillsScope === "global" ? "global" : undefined;
+		await ensureSkillsUpToDate(
+			agentForSkills,
+			detectedSkillsScope,
+			options.preview,
+		);
 	}
 
 	// -----------------------------------------------------------------------
@@ -653,7 +697,7 @@ async function interactiveInitInner(
 	if (options.preview) gettingStartedData.preview = true;
 
 	// Build a prompt for the user to paste into their agent chat
-	const cmd = `neonctl init --agent --json --data '${JSON.stringify({ step: "getting-started", ...gettingStartedData })}'`;
+	const cmd = `neonctl init --agent --data '${JSON.stringify({ step: "getting-started", ...gettingStartedData })}'`;
 	// Account for clack's "│  " prefix (3 chars) when wrapping
 	const cols = (process.stdout.columns || 80) - 3;
 	const promptText = `To finish setting up Neon using Neon's agent-guided onboarding experience, have your agent run this shell command: ${cmd}`;
