@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { slugify, toNeonBranchName } from "./branch-name.js";
+import { toNeonBranchName } from "./branch-name.js";
 
 describe("toNeonBranchName", () => {
 	test("lowercases and slugifies a simple name", () => {
@@ -69,14 +69,10 @@ describe("toNeonBranchName", () => {
 		const once = toNeonBranchName("preview/feature/billing-ui");
 		expect(toNeonBranchName(once)).toBe(once);
 	});
-});
 
-describe("slugify", () => {
-	test("produces a flat token with no slashes", () => {
-		expect(slugify("feature/Billing UI")).toBe("feature-billing-ui");
-	});
-
-	test("honors prefix and lowercase options", () => {
-		expect(slugify("Billing", { prefix: "fn-" })).toBe("fn-billing");
+	test("flattens to a single token when preserveSlashes is false", () => {
+		expect(
+			toNeonBranchName("feature/Billing UI", { preserveSlashes: false }),
+		).toBe("feature-billing-ui");
 	});
 });

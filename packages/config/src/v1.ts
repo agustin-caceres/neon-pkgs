@@ -101,7 +101,7 @@ export const schemas = {
 export { createNeonApiFromOptions, resolveApiKey } from "./lib/auth.js";
 // ─── Branch-name helper (pure; shared with the CLI's git → Neon mapping) ──────
 export type { ToNeonBranchNameOptions } from "./lib/branch-name.js";
-export { slugify, toNeonBranchName } from "./lib/branch-name.js";
+export { toNeonBranchName } from "./lib/branch-name.js";
 // ─── Credentials (pure scope derivation; Preview) ─────────────────────────────
 export type { CredentialFeatureFlags } from "./lib/credentials.js";
 export {

@@ -1,5 +1,5 @@
 import { describe, expectTypeOf, test } from "vitest";
-import { slugify, toNeonBranchName } from "./branch-name.js";
+import { toNeonBranchName } from "./branch-name.js";
 import { defineConfig } from "./define-config.js";
 import type {
 	CheckoutAfterContext,
@@ -235,10 +235,9 @@ describe("defineConfig hooks — negative (@ts-expect-error)", () => {
 	});
 });
 
-describe("toNeonBranchName / slugify (types)", () => {
-	test("both return a string", () => {
+describe("toNeonBranchName (types)", () => {
+	test("returns a string", () => {
 		expectTypeOf(toNeonBranchName("x")).toEqualTypeOf<string>();
-		expectTypeOf(slugify("x")).toEqualTypeOf<string>();
 	});
 
 	test("options are accepted (positive)", () => {
@@ -248,17 +247,10 @@ describe("toNeonBranchName / slugify (types)", () => {
 			lowercase: true,
 			preserveSlashes: false,
 		});
-		// slugify intentionally omits `preserveSlashes` from its options.
-		slugify("x", { prefix: "fn-", maxLength: 20, lowercase: false });
 	});
 
 	test("an unknown option is rejected", () => {
 		// @ts-expect-error `unknown` is not a ToNeonBranchNameOptions field.
 		toNeonBranchName("x", { unknown: 1 });
-	});
-
-	test("slugify does not accept preserveSlashes", () => {
-		// @ts-expect-error slugify omits `preserveSlashes` (it always flattens).
-		slugify("x", { preserveSlashes: true });
 	});
 });

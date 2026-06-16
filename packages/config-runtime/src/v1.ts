@@ -66,7 +66,6 @@ export {
 	PlatformError,
 	PushAbortedError,
 	PushConflictError,
-	slugify,
 	toNeonBranchName,
 } from "@neondatabase/config";
 export type { FunctionBundler } from "./lib/function-bundle.js";

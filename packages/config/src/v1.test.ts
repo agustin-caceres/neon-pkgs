@@ -67,7 +67,6 @@ describe("@neondatabase/config public value surface", () => {
 			  "resolveApiKey",
 			  "resolveConfig",
 			  "schemas",
-			  "slugify",
 			  "toNeonBranchName",
 			]
 		`);

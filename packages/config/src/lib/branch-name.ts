@@ -70,17 +70,3 @@ export function toNeonBranchName(
 	}
 	return name;
 }
-
-/**
- * Generic slug helper: {@link toNeonBranchName} with slashes flattened to `-`. Handy when you
- * want a single flat token (e.g. a function slug-ish identifier) rather than a hierarchical
- * branch name.
- *
- * @example slugify("feature/Billing UI") // "feature-billing-ui"
- */
-export function slugify(
-	input: string,
-	options: Omit<ToNeonBranchNameOptions, "preserveSlashes"> = {},
-): string {
-	return toNeonBranchName(input, { ...options, preserveSlashes: false });
-}

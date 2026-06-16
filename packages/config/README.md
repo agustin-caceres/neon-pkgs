@@ -168,7 +168,7 @@ export default defineConfig({
 
 Each phase (`checkout`, `deploy`) exposes a `before` (influence/abort) and `after` (observe) hook. A hook is either a **function** `(ctx) => …` or a **shell command** (string or array run sequentially). `before` functions can return overrides (`checkout.before` → `{ name }`); any hook can throw / exit non-zero to abort a `before` phase. The `git` context is read-only — hooks never drive git.
 
-`toNeonBranchName(input, opts?)` / `slugify(input, opts?)` derive a valid, stable Neon branch name from an arbitrary string (e.g. a git branch); options: `{ prefix, maxLength, lowercase, preserveSlashes }`.
+`toNeonBranchName(input, opts?)` derives a valid, stable Neon branch name from an arbitrary string (e.g. a git branch); options: `{ prefix, maxLength, lowercase, preserveSlashes }` (pass `preserveSlashes: false` for a single flat token).
 
 > The imperative runner that executes these hooks lives in `@neondatabase/config-runtime` (`runHook` / `runShellHook`); the CLI invokes it at the checkout/deploy seams. `neon.ts` only authors the hooks.
 
