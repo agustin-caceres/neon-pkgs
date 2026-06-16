@@ -38,28 +38,36 @@ import type {
 	FunctionDef,
 	FunctionDevConfig,
 	FunctionRuntime,
+	FunctionSlugOf,
 	FunctionTuning,
 	GetConnectionUriInput,
 	GitContext,
 	Hook,
 	HookBranch,
-	HookEnv,
 	Hooks,
 	LoadConfigOptions,
+	NeonAiGatewayEnv,
 	NeonApi,
+	NeonAuthEnv,
 	NeonAuthSnapshot,
+	NeonBranchEnv,
 	NeonBranchSnapshot,
 	NeonBranchStorageSnapshot,
 	NeonBucketSnapshot,
 	NeonCredentialMeta,
 	NeonCredentialSecret,
+	NeonDataApiEnv,
 	NeonDataApiSnapshot,
 	NeonDatabaseSnapshot,
 	NeonEndpointSnapshot,
+	NeonEnv,
 	NeonFunctionDeploymentSnapshot,
+	NeonFunctionEnv,
 	NeonFunctionSnapshot,
+	NeonPostgresEnv,
 	NeonProjectSnapshot,
 	NeonRoleSnapshot,
+	NeonStorageEnv,
 	PlanStep,
 	PostgresConfig,
 	PreviewInput,
@@ -141,10 +149,21 @@ describe("config type-export surface", () => {
 		expectTypeOf<DeployAfterContext>().not.toBeAny();
 		expectTypeOf<GitContext>().not.toBeAny();
 		expectTypeOf<HookBranch>().not.toBeAny();
-		expectTypeOf<HookEnv>().not.toBeAny();
 		expectTypeOf<Hook<CheckoutAfterContext>>().not.toBeAny();
 		expectTypeOf<ShellHook>().not.toBeAny();
 		expectTypeOf<ToNeonBranchNameOptions>().not.toBeAny();
+	});
+
+	test("every public resolved-env type is exported (compile-time tripwire)", () => {
+		expectTypeOf<NeonEnv>().not.toBeAny();
+		expectTypeOf<NeonPostgresEnv>().not.toBeAny();
+		expectTypeOf<NeonBranchEnv>().not.toBeAny();
+		expectTypeOf<NeonAuthEnv>().not.toBeAny();
+		expectTypeOf<NeonDataApiEnv>().not.toBeAny();
+		expectTypeOf<NeonStorageEnv>().not.toBeAny();
+		expectTypeOf<NeonAiGatewayEnv>().not.toBeAny();
+		expectTypeOf<FunctionSlugOf<Config>>().not.toBeAny();
+		expectTypeOf<NeonFunctionEnv<Config, never>>().not.toBeAny();
 	});
 
 	test("every public NeonApi adapter type is exported (compile-time tripwire)", () => {

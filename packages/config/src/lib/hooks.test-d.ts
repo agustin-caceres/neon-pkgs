@@ -2,14 +2,21 @@ import { describe, expectTypeOf, test } from "vitest";
 import { toNeonBranchName } from "./branch-name.js";
 import { defineConfig } from "./define-config.js";
 import type {
+	NeonAiGatewayEnv,
+	NeonAuthEnv,
+	NeonDataApiEnv,
+	NeonEnv,
+	NeonStorageEnv,
+} from "./env.js";
+import type {
 	CheckoutAfterContext,
 	CheckoutBeforeContext,
 	CheckoutBeforeResult,
+	Config,
 	DeployAfterContext,
 	DeployBeforeContext,
 	GitContext,
 	HookBranch,
-	HookEnv,
 	Hooks,
 	PushResult,
 	ShellHook,
@@ -45,22 +52,52 @@ describe("GitContext shape", () => {
 	});
 });
 
-describe("HookEnv shape", () => {
-	test("postgres connection strings are always-present strings", () => {
-		expectTypeOf<
-			HookEnv["postgres"]["databaseUrl"]
-		>().toEqualTypeOf<string>();
-		expectTypeOf<
-			HookEnv["postgres"]["databaseUrlUnpooled"]
-		>().toEqualTypeOf<string>();
-	});
-
-	test("branch identity is optional", () => {
-		expectTypeOf<HookEnv["branch"]>().toEqualTypeOf<
+describe("NeonEnv<C> — exact per-policy env shape (the after-hook `env`)", () => {
+	test("postgres is always present; branch is optional", () => {
+		expectTypeOf<NeonEnv["postgres"]>().toEqualTypeOf<{
+			databaseUrl: string;
+			databaseUrlUnpooled: string;
+		}>();
+		expectTypeOf<NeonEnv["branch"]>().toEqualTypeOf<
 			{ name: string } | undefined
 		>();
 	});
+
+	test("a bare policy carries only postgres + branch (no auth/dataApi/storage/aiGateway)", () => {
+		type Bare = NeonEnv<Config>;
+		expectTypeOf<keyof Bare>().toEqualTypeOf<"postgres" | "branch">();
+	});
+
+	test("enabling `auth` adds `env.auth` (typed), and only then", () => {
+		type WithAuth = NeonEnv<typeof authConfig>;
+		expectTypeOf<WithAuth["auth"]>().toEqualTypeOf<NeonAuthEnv>();
+		// @ts-expect-error a policy without `auth` has no `env.auth`.
+		type _NoAuth = NeonEnv<Config>["auth"];
+	});
+
+	test("enabling `dataApi` adds `env.dataApi` (typed)", () => {
+		type WithDataApi = NeonEnv<typeof dataApiConfig>;
+		expectTypeOf<WithDataApi["dataApi"]>().toEqualTypeOf<NeonDataApiEnv>();
+	});
+
+	test("declaring `preview.buckets` adds `env.storage` (typed)", () => {
+		type WithStorage = NeonEnv<typeof bucketConfig>;
+		expectTypeOf<WithStorage["storage"]>().toEqualTypeOf<NeonStorageEnv>();
+	});
+
+	test("enabling `preview.aiGateway` adds `env.aiGateway` (typed)", () => {
+		type WithAi = NeonEnv<typeof aiConfig>;
+		expectTypeOf<WithAi["aiGateway"]>().toEqualTypeOf<NeonAiGatewayEnv>();
+	});
 });
+
+// Representative policies whose `typeof` drives the NeonEnv presence-matrix assertions above.
+const authConfig = defineConfig({ auth: true });
+const dataApiConfig = defineConfig({ auth: true, dataApi: true });
+const bucketConfig = defineConfig({
+	preview: { buckets: { uploads: {} } },
+});
+const aiConfig = defineConfig({ preview: { aiGateway: true } });
 
 describe("HookBranch shape", () => {
 	test("identity + state fields are typed (created/isDefault/isProtected are booleans)", () => {
@@ -90,11 +127,13 @@ describe("hook context shapes per phase", () => {
 		expectTypeOf<CheckoutBeforeContext["env"]>();
 	});
 
-	test("checkout.after sees branch + env + git", () => {
+	test("checkout.after sees branch + env (NeonEnv<C>) + git", () => {
 		expectTypeOf<
 			CheckoutAfterContext["branch"]
 		>().toEqualTypeOf<HookBranch>();
-		expectTypeOf<CheckoutAfterContext["env"]>().toEqualTypeOf<HookEnv>();
+		expectTypeOf<CheckoutAfterContext["env"]>().toEqualTypeOf<
+			NeonEnv<Config>
+		>();
 		expectTypeOf<CheckoutAfterContext["git"]>().toEqualTypeOf<GitContext>();
 	});
 
@@ -107,11 +146,13 @@ describe("hook context shapes per phase", () => {
 		expectTypeOf<DeployBeforeContext["env"]>();
 	});
 
-	test("deploy.after sees branch + env + result (PushResult) + git", () => {
+	test("deploy.after sees branch + env (NeonEnv<C>) + result (PushResult) + git", () => {
 		expectTypeOf<
 			DeployAfterContext["branch"]
 		>().toEqualTypeOf<HookBranch>();
-		expectTypeOf<DeployAfterContext["env"]>().toEqualTypeOf<HookEnv>();
+		expectTypeOf<DeployAfterContext["env"]>().toEqualTypeOf<
+			NeonEnv<Config>
+		>();
 		expectTypeOf<
 			DeployAfterContext["result"]
 		>().toEqualTypeOf<PushResult>();
@@ -144,7 +185,10 @@ describe("defineConfig hooks — positive (every valid form type-checks)", () =>
 						return { name: `preview/${ctx.inputName}` };
 					},
 					after: async (ctx) => {
-						expectTypeOf(ctx).toEqualTypeOf<CheckoutAfterContext>();
+						// Bare policy (no services): env is exactly postgres + branch.
+						expectTypeOf<keyof typeof ctx.env>().toEqualTypeOf<
+							"postgres" | "branch"
+						>();
 						expectTypeOf(
 							ctx.env.postgres.databaseUrl,
 						).toEqualTypeOf<string>();
@@ -155,11 +199,47 @@ describe("defineConfig hooks — positive (every valid form type-checks)", () =>
 				},
 				deploy: {
 					before: (ctx) => {
-						expectTypeOf(ctx).toEqualTypeOf<DeployBeforeContext>();
+						expectTypeOf(ctx.branch.id).toEqualTypeOf<string>();
 					},
 					after: async (ctx) => {
-						expectTypeOf(ctx).toEqualTypeOf<DeployAfterContext>();
 						expectTypeOf(ctx.result).toEqualTypeOf<PushResult>();
+						expectTypeOf<keyof typeof ctx.env>().toEqualTypeOf<
+							"postgres" | "branch"
+						>();
+					},
+				},
+			},
+		});
+	});
+
+	test("the after-hook `env` reflects the policy: `auth: true` ⇒ `env.auth` is present + typed", () => {
+		defineConfig({
+			auth: true,
+			hooks: {
+				checkout: {
+					after: (ctx) => {
+						expectTypeOf(ctx.env.auth).toEqualTypeOf<NeonAuthEnv>();
+						expectTypeOf(
+							ctx.env.postgres.databaseUrl,
+						).toEqualTypeOf<string>();
+					},
+				},
+				deploy: {
+					after: (ctx) => {
+						expectTypeOf(ctx.env.auth).toEqualTypeOf<NeonAuthEnv>();
+					},
+				},
+			},
+		});
+	});
+
+	test("the after-hook `env` omits namespaces the policy doesn't enable", () => {
+		defineConfig({
+			hooks: {
+				checkout: {
+					after: (ctx) => {
+						// @ts-expect-error no `auth` in the policy ⇒ no `env.auth`.
+						ctx.env.auth;
 					},
 				},
 			},

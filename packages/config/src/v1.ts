@@ -119,6 +119,18 @@ export type {
 	RemoteState,
 } from "./lib/diff.js";
 export { diffConfig } from "./lib/diff.js";
+// ─── Resolved-env types (canonical home; re-exported by @neondatabase/env) ────
+export type {
+	FunctionSlugOf,
+	NeonAiGatewayEnv,
+	NeonAuthEnv,
+	NeonBranchEnv,
+	NeonDataApiEnv,
+	NeonEnv,
+	NeonFunctionEnv,
+	NeonPostgresEnv,
+	NeonStorageEnv,
+} from "./lib/env.js";
 // ─── Errors ────────────────────────────────────────────────────────────────────
 export {
 	ConfigLoadError,
@@ -193,7 +205,6 @@ export type {
 	GitContext,
 	Hook,
 	HookBranch,
-	HookEnv,
 	Hooks,
 	PostgresConfig,
 	PreviewInput,

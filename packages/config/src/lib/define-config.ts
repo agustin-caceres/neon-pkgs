@@ -160,9 +160,10 @@ export function defineConfig<
 	// object (see `PreviewAutocomplete`), which the bare index signature otherwise hides.
 	preview?: Preview & PreviewInput & PreviewAutocomplete<Preview>;
 	branch?: BranchTuningFn<Preview>;
-	// Imperative lifecycle hooks (Preview). Static — carried through onto the returned
-	// Config and read by the runtime at `checkout` / `deploy` time. Never evaluated here.
-	hooks?: Hooks;
+	// Imperative lifecycle hooks (Preview). Static — carried through onto the returned Config
+	// and read by the runtime at `checkout` / `deploy` time. Never evaluated here. Bound to
+	// the inferred policy so an `after` hook's `env` is the exact `NeonEnv<this config>`.
+	hooks?: Hooks<Config<Auth, DataApi, Preview>>;
 }): Config<Auth, DataApi, Preview> {
 	if (typeof input === "function") {
 		throw new ConfigValidationError([

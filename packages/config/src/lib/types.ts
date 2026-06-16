@@ -1,3 +1,5 @@
+import type { NeonEnv } from "./env.js";
+
 /**
  * Valid Neon Compute Unit values.
  * Most plans support 0.25, 0.5, 1, 2, 4, 8. Higher values may be available on Business plans.
@@ -508,9 +510,10 @@ export interface Config<
 	 * Imperative lifecycle hooks (Preview) — run side effects (migrations, seeding, …) on the
 	 * real `checkout` / `deploy` commands. The declarative companion to {@link branch}: hooks
 	 * never run during `plan` / `status` / `inspect`, so the diff engine and typed env stay
-	 * sound. See {@link Hooks}.
+	 * sound. Bound to this policy so `after` hooks receive the exact `NeonEnv<this config>`.
+	 * See {@link Hooks}.
 	 */
-	hooks?: Hooks;
+	hooks?: Hooks<Config<Auth, DataApi, Preview>>;
 }
 
 /**
@@ -670,30 +673,6 @@ export interface GitContext {
 }
 
 /**
- * The resolved Neon connection environment handed to `after` hooks — structurally a subset
- * of `NeonEnv` from `@neondatabase/env` (which the CLI passes through at runtime). Typed
- * structurally here rather than importing `NeonEnv` to avoid a dependency cycle
- * (`@neondatabase/env` already depends on this package). The `postgres` connection strings
- * are always present after a checkout/deploy; the remaining namespaces (`auth`, `dataApi`,
- * `storage`, `aiGateway`, `function`) appear when the policy enables them.
- *
- * NOTE (Preview): precise per-policy typing (`NeonEnv<typeof config>`) is a planned
- * follow-up that requires lifting the env-shape derivation into a shared location.
- */
-export interface HookEnv {
-	postgres: {
-		/** Pooled connection string (`DATABASE_URL`). */
-		databaseUrl: string;
-		/** Direct/unpooled connection string (`DATABASE_URL_UNPOOLED`) — use for migrations. */
-		databaseUrlUnpooled: string;
-	};
-	/** Branch identity (`NEON_BRANCH`), when injected. */
-	branch?: { name: string };
-	/** Other `NeonEnv` namespaces (auth/dataApi/storage/aiGateway/function), policy-dependent. */
-	[namespace: string]: unknown;
-}
-
-/**
  * The branch a hook is acting on — a resolved, live branch (unlike the pre-create
  * {@link BranchTarget} the `branch` closure may receive). Always carries a concrete `id`.
  */
@@ -734,10 +713,14 @@ export interface CheckoutBeforeResult {
 	name?: string;
 }
 
-/** Context passed to `hooks.checkout.after` (branch resolved + env pulled). */
-export interface CheckoutAfterContext {
+/**
+ * Context passed to `hooks.checkout.after` (branch resolved + env pulled). Generic over the
+ * policy `C` so `env` is the **exact** {@link NeonEnv}`<C>` — `env.auth`, `env.dataApi`, … are
+ * present iff the policy enables them, with no `any`/`unknown` escape hatch.
+ */
+export interface CheckoutAfterContext<C extends Config = Config> {
 	branch: HookBranch;
-	env: HookEnv;
+	env: NeonEnv<C>;
 	git: GitContext;
 }
 
@@ -747,10 +730,13 @@ export interface DeployBeforeContext {
 	git: GitContext;
 }
 
-/** Context passed to `hooks.deploy.after` (policy applied, env pulled). */
-export interface DeployAfterContext {
+/**
+ * Context passed to `hooks.deploy.after` (policy applied, env pulled). Generic over the policy
+ * `C` so `env` is the exact {@link NeonEnv}`<C>`.
+ */
+export interface DeployAfterContext<C extends Config = Config> {
 	branch: HookBranch;
-	env: HookEnv;
+	env: NeonEnv<C>;
 	/** What the apply changed. */
 	result: PushResult;
 	git: GitContext;
@@ -774,29 +760,33 @@ export type Hook<Ctx, Result = void> =
 	| ((ctx: Ctx) => Result | Promise<Result>)
 	| ShellHook;
 
-/** Hooks for the `checkout` command (`neonctl checkout`). */
-export interface CheckoutHooks {
+/** Hooks for the `checkout` command (`neonctl checkout`). Generic over the policy `C`. */
+export interface CheckoutHooks<C extends Config = Config> {
 	/** Runs before the branch is resolved; may rewrite the name (function form) or abort. */
 	// biome-ignore lint/suspicious/noConfusingVoidType: a `before` hook may return an override or nothing — `void` (not `undefined`) is what lets a no-op `() => {}` validation hook type-check.
 	before?: Hook<CheckoutBeforeContext, CheckoutBeforeResult | void>;
 	/** Runs after checkout + env pull. Use `branch.created` to distinguish new vs existing. */
-	after?: Hook<CheckoutAfterContext>;
+	after?: Hook<CheckoutAfterContext<C>>;
 }
 
-/** Hooks for the `deploy` command (`neonctl deploy` / `config apply`). */
-export interface DeployHooks {
+/** Hooks for the `deploy` command (`neonctl deploy` / `config apply`). Generic over `C`. */
+export interface DeployHooks<C extends Config = Config> {
 	/** Runs before the policy is applied; throw/non-zero exit to abort. */
 	before?: Hook<DeployBeforeContext, void>;
 	/** Runs after a successful apply + env pull. */
-	after?: Hook<DeployAfterContext>;
+	after?: Hook<DeployAfterContext<C>>;
 }
 
 /**
  * Imperative lifecycle hooks, keyed by the CLI command they bracket. Each phase exposes a
  * `before` (influence/abort) and `after` (observe) hook. Hooks never run during `plan` /
  * `status` / `inspect`.
+ *
+ * Generic over the policy `C` so `after` hooks receive the exact {@link NeonEnv}`<C>`.
+ * `defineConfig` binds `C` to the policy you're authoring, so `env.auth` / `env.dataApi` /
+ * … are present in the hook iff the policy enables them.
  */
-export interface Hooks {
-	checkout?: CheckoutHooks;
-	deploy?: DeployHooks;
+export interface Hooks<C extends Config = Config> {
+	checkout?: CheckoutHooks<C>;
+	deploy?: DeployHooks<C>;
 }
