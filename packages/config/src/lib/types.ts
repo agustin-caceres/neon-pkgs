@@ -504,6 +504,13 @@ export interface Config<
 	preview?: Preview;
 	/** Per-branch tuning closure. Cannot change the static existential set. */
 	branch?: BranchTuningFn<Preview>;
+	/**
+	 * Imperative lifecycle hooks (Preview) — run side effects (migrations, seeding, …) on the
+	 * real `checkout` / `deploy` commands. The declarative companion to {@link branch}: hooks
+	 * never run during `plan` / `status` / `inspect`, so the diff engine and typed env stay
+	 * sound. See {@link Hooks}.
+	 */
+	hooks?: Hooks;
 }
 
 /**
@@ -614,4 +621,182 @@ export interface PushResult {
 	dryRun: boolean;
 	applied: AppliedChange[];
 	conflicts: ConflictReport[];
+}
+
+// ─── Lifecycle hooks (Preview) ──────────────────────────────────────────────────
+//
+// Hooks are the **imperative** companion to the pure, declarative `branch` closure.
+// `branch()` answers *"what should this branch look like?"* (and runs during `plan` /
+// `status` / `apply`, so it must stay side-effect free). Hooks answer *"do this when a
+// branch is checked out / deployed"* (migrations, seeding, notifications) and run **only**
+// during the real `checkout` / `deploy` commands — never during `plan` / `status` /
+// `inspect`. That separation is what keeps the diff engine deterministic and the typed
+// env (`NeonEnv<typeof config>`) sound.
+
+/**
+ * Read-only git facts injected into every hook by the CLI. A hook can *read* the git state
+ * (to name a branch, gate a migration, …) but the hooks never *drive* git — that keeps the
+ * git → Neon relationship a loop-free, one-way edge (`git checkout` syncs Neon, never the
+ * reverse). Populated from the surrounding repository; all fields except `available`,
+ * `isDetached`, `isDirty`, and `triggeredByGitHook` are absent when {@link available} is
+ * `false` (not a git repo, or `git` is not installed).
+ */
+export interface GitContext {
+	/** `false` when the command did not run inside a git work tree (or `git` is missing). */
+	available: boolean;
+	/** Current branch (`git symbolic-ref --short HEAD`). Undefined in detached-HEAD state. */
+	branch?: string;
+	/** Full commit SHA of `HEAD`. */
+	sha?: string;
+	/** Abbreviated commit SHA of `HEAD`. */
+	shortSha?: string;
+	/** `true` when `HEAD` is detached (no current branch). */
+	isDetached: boolean;
+	/** `true` when the work tree has uncommitted changes (`git status --porcelain`). */
+	isDirty: boolean;
+	/** Default branch the remote points at (`origin/HEAD`), e.g. `"main"`, when resolvable. */
+	defaultBranch?: string;
+	/** `origin` remote URL, when configured. */
+	remoteUrl?: string;
+	/** Absolute path to the repository root (`git rev-parse --show-toplevel`). */
+	repoRoot?: string;
+	/**
+	 * `true` when this invocation was triggered by the installed git `post-checkout` hook
+	 * (via `neonctl git sync`), `false` for a manual `neonctl checkout` / `deploy`. Lets a
+	 * `checkout.before` hook decide whether to follow `git.branch` or honor an explicit
+	 * `inputName`.
+	 */
+	triggeredByGitHook: boolean;
+}
+
+/**
+ * The resolved Neon connection environment handed to `after` hooks — structurally a subset
+ * of `NeonEnv` from `@neondatabase/env` (which the CLI passes through at runtime). Typed
+ * structurally here rather than importing `NeonEnv` to avoid a dependency cycle
+ * (`@neondatabase/env` already depends on this package). The `postgres` connection strings
+ * are always present after a checkout/deploy; the remaining namespaces (`auth`, `dataApi`,
+ * `storage`, `aiGateway`, `function`) appear when the policy enables them.
+ *
+ * NOTE (Preview): precise per-policy typing (`NeonEnv<typeof config>`) is a planned
+ * follow-up that requires lifting the env-shape derivation into a shared location.
+ */
+export interface HookEnv {
+	postgres: {
+		/** Pooled connection string (`DATABASE_URL`). */
+		databaseUrl: string;
+		/** Direct/unpooled connection string (`DATABASE_URL_UNPOOLED`) — use for migrations. */
+		databaseUrlUnpooled: string;
+	};
+	/** Branch identity (`NEON_BRANCH`), when injected. */
+	branch?: { name: string };
+	/** Other `NeonEnv` namespaces (auth/dataApi/storage/aiGateway/function), policy-dependent. */
+	[namespace: string]: unknown;
+}
+
+/**
+ * The branch a hook is acting on — a resolved, live branch (unlike the pre-create
+ * {@link BranchTarget} the `branch` closure may receive). Always carries a concrete `id`.
+ */
+export interface HookBranch {
+	/** Neon project id the branch belongs to. */
+	projectId: string;
+	/** Neon branch id (`br-…`). */
+	id: string;
+	/** Branch name. */
+	name: string;
+	/** `true` when **this** operation created the branch (vs selecting an existing one). */
+	created: boolean;
+	/** Whether Neon marks the branch as the project default. */
+	isDefault: boolean;
+	/** Whether Neon marks the branch protected. */
+	isProtected: boolean;
+	/** Parent branch id, when known. */
+	parentId?: string;
+	/** Branch expiration timestamp, when set. */
+	expiresAt?: string;
+}
+
+/** Context passed to `hooks.checkout.before` (runs before the branch name is resolved). */
+export interface CheckoutBeforeContext {
+	/** The branch name/id the user passed to `checkout` (or the git branch, via `git sync`). */
+	inputName: string;
+	git: GitContext;
+}
+
+/**
+ * Return value of a `hooks.checkout.before` **function** hook. Return `{ name }` to rewrite
+ * the branch that will be checked out / created; return nothing to keep `inputName`. Throw to
+ * abort the checkout. (Shell-command `before` hooks cannot rewrite the name — only abort via a
+ * non-zero exit — since they have no return channel.)
+ */
+export interface CheckoutBeforeResult {
+	/** Overrides the Neon branch name to check out / create. */
+	name?: string;
+}
+
+/** Context passed to `hooks.checkout.after` (branch resolved + env pulled). */
+export interface CheckoutAfterContext {
+	branch: HookBranch;
+	env: HookEnv;
+	git: GitContext;
+}
+
+/** Context passed to `hooks.deploy.before` (branch resolved, policy not yet applied). */
+export interface DeployBeforeContext {
+	branch: HookBranch;
+	git: GitContext;
+}
+
+/** Context passed to `hooks.deploy.after` (policy applied, env pulled). */
+export interface DeployAfterContext {
+	branch: HookBranch;
+	env: HookEnv;
+	/** What the apply changed. */
+	result: PushResult;
+	git: GitContext;
+}
+
+/**
+ * A shell-command hook: a single command string, or a list of commands run sequentially
+ * (each must exit 0 or the operation aborts). Commands run **non-interactively** (stdin is
+ * not a TTY and `CI=1` is set) so an accidental interactive command (`drizzle-kit push`)
+ * fails fast instead of hanging. Resolved Neon env vars are injected into the command's
+ * environment.
+ */
+export type ShellHook = string | string[];
+
+/**
+ * A lifecycle hook: either a (possibly async) function receiving a typed `Ctx`, or a
+ * {@link ShellHook}. `before` hooks may influence/abort (functions can return `Result`,
+ * any hook can throw to abort); `after` hooks observe (their return value is ignored).
+ */
+export type Hook<Ctx, Result = void> =
+	| ((ctx: Ctx) => Result | Promise<Result>)
+	| ShellHook;
+
+/** Hooks for the `checkout` command (`neonctl checkout`). */
+export interface CheckoutHooks {
+	/** Runs before the branch is resolved; may rewrite the name (function form) or abort. */
+	// biome-ignore lint/suspicious/noConfusingVoidType: a `before` hook may return an override or nothing — `void` (not `undefined`) is what lets a no-op `() => {}` validation hook type-check.
+	before?: Hook<CheckoutBeforeContext, CheckoutBeforeResult | void>;
+	/** Runs after checkout + env pull. Use `branch.created` to distinguish new vs existing. */
+	after?: Hook<CheckoutAfterContext>;
+}
+
+/** Hooks for the `deploy` command (`neonctl deploy` / `config apply`). */
+export interface DeployHooks {
+	/** Runs before the policy is applied; throw/non-zero exit to abort. */
+	before?: Hook<DeployBeforeContext, void>;
+	/** Runs after a successful apply + env pull. */
+	after?: Hook<DeployAfterContext>;
+}
+
+/**
+ * Imperative lifecycle hooks, keyed by the CLI command they bracket. Each phase exposes a
+ * `before` (influence/abort) and `after` (observe) hook. Hooks never run during `plan` /
+ * `status` / `inspect`.
+ */
+export interface Hooks {
+	checkout?: CheckoutHooks;
+	deploy?: DeployHooks;
 }

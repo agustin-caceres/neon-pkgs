@@ -57,6 +57,7 @@ import {
 	dataApiSettingsSchema,
 	functionDefSchema,
 	functionTuningSchema,
+	hooksSchema,
 	postgresConfigSchema,
 	previewInputSchema,
 	serviceToggleInputSchema,
@@ -89,6 +90,7 @@ export const schemas = {
 	dataApiSettings: dataApiSettingsSchema,
 	function: functionDefSchema,
 	functionTuning: functionTuningSchema,
+	hooks: hooksSchema,
 	postgres: postgresConfigSchema,
 	preview: previewInputSchema,
 	service: serviceToggleSchema,
@@ -97,6 +99,9 @@ export const schemas = {
 
 // ─── Lower-level adapters ──────────────────────────────────────────────────────
 export { createNeonApiFromOptions, resolveApiKey } from "./lib/auth.js";
+// ─── Branch-name helper (pure; shared with the CLI's git → Neon mapping) ──────
+export type { ToNeonBranchNameOptions } from "./lib/branch-name.js";
+export { slugify, toNeonBranchName } from "./lib/branch-name.js";
 // ─── Credentials (pure scope derivation; Preview) ─────────────────────────────
 export type { CredentialFeatureFlags } from "./lib/credentials.js";
 export {
@@ -160,6 +165,10 @@ export type {
 	BranchTuningFn,
 	BucketAccessLevel,
 	BucketDef,
+	CheckoutAfterContext,
+	CheckoutBeforeContext,
+	CheckoutBeforeResult,
+	CheckoutHooks,
 	ComputeSettings,
 	ComputeUnit,
 	Config,
@@ -172,12 +181,20 @@ export type {
 	DataApiInput,
 	DataApiNeonAuthConfig,
 	DataApiSettings,
+	DeployAfterContext,
+	DeployBeforeContext,
+	DeployHooks,
 	DurationString,
 	DurationUnit,
 	FunctionDef,
 	FunctionDevConfig,
 	FunctionRuntime,
 	FunctionTuning,
+	GitContext,
+	Hook,
+	HookBranch,
+	HookEnv,
+	Hooks,
 	PostgresConfig,
 	PreviewInput,
 	PreviewTuning,
@@ -190,6 +207,7 @@ export type {
 	ServiceEnabled,
 	ServiceToggle,
 	ServiceToggleInput,
+	ShellHook,
 } from "./lib/types.js";
 // ─── Config types (used in neon.ts and in operation return values) ────────────
 export { DATA_API_AUTH_PROVIDERS } from "./lib/types.js";
