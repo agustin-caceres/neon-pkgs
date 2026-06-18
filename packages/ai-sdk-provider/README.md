@@ -1,6 +1,6 @@
 # @neondatabase/ai-sdk-provider
 
-Community [Vercel AI SDK](https://ai-sdk.dev) provider for the [Neon](https://neon.com) AI Gateway.
+Community [Vercel AI SDK](https://ai-sdk.dev) provider for the [Neon](https://neon.com) AI Gateway. Requires **AI SDK v6** (`ai@^6`).
 
 The Neon AI Gateway is **branch-scoped**: each Neon project branch gets its own gateway host, and a platform token authorizes requests for that branch. This provider routes each model to the best gateway endpoint (Anthropic → native Messages, OpenAI → native Responses incl. **Codex**, everything else → unified OpenAI-compatible MLflow endpoint), so a single `neon('claude-...')` call reaches the whole catalog.
 
@@ -9,7 +9,7 @@ Model ids use the canonical Neon (unprefixed) form — `claude-sonnet-4-6`, `gpt
 ## Install
 
 ```bash
-npm install @neondatabase/ai-sdk-provider
+npm install @neondatabase/ai-sdk-provider ai@^6
 ```
 
 ## Configuration
@@ -68,12 +68,11 @@ Available on OpenAI models via the Responses `image_generation` tool (there is n
 ```ts
 import { streamText } from "ai";
 import { neon } from "@neondatabase/ai-sdk-provider/v1";
-import { imageGeneration } from "@ai-sdk/openai/internal";
 
 const result = streamText({
   model: neon("gpt-5-mini"),
   prompt: "Generate an image of a red apple on a wooden table",
-  tools: { image: imageGeneration({ partialImages: 3 }) },
+  tools: { image: neon.tools.imageGeneration({ partialImages: 3 }) },
 });
 
 for await (const part of result.fullStream) {
@@ -88,6 +87,18 @@ for await (const part of result.fullStream) {
 
 - `generateImage()` and embeddings (`embed` / `embedMany`) are not offered by the gateway and throw `NoSuchModelError`.
 - `gpt-oss-*` models return a non-standard ("harmony") response shape on the unified endpoint and are not fully supported.
+- OpenAI Responses multi-turn tool flows (`generateText` + `stepCountIs`) can return 502 from the gateway; tool calling is covered on Anthropic/Google/Meta in e2e.
+
+## End-to-end tests
+
+Against a live branch with AI Gateway enabled:
+
+```bash
+cp .env.example .env   # fill NEON_AI_GATEWAY_BASE_URL + NEON_AI_GATEWAY_TOKEN from `neonctl env pull`
+pnpm test:e2e
+```
+
+The matrix covers one models.dev `neon` model per family (Anthropic, OpenAI, Codex, Gemini, Meta) across `generateText`, `streamText`, `generateObject`, tool calling, and `neon.tools.imageGeneration`. Skipped when gateway env vars are absent.
 
 ## Versioning
 
