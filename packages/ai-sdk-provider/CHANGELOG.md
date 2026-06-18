@@ -1,5 +1,11 @@
 # @neondatabase/ai-sdk-provider
 
+## Unreleased
+
+### Minor Changes
+
+- Read `NEON_AI_GATEWAY_HOST` (bare branch gateway origin) instead of `NEON_AI_GATEWAY_BASE_URL`.
+
 ## 0.2.0
 
 ### Minor Changes

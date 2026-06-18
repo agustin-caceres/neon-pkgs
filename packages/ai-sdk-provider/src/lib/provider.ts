@@ -6,7 +6,7 @@
  * Responses incl. Codex, everything else → unified MLflow), so a single
  * `neon('claude-...')` call (same base URL + token) reaches the whole catalog.
  * Ids use the canonical Neon (unprefixed) form; the legacy `databricks-` prefix
- * is also accepted. Configure with the branch-scoped `NEON_AI_GATEWAY_BASE_URL` +
+ * is also accepted. Configure with the branch-scoped `NEON_AI_GATEWAY_HOST` +
  * `NEON_AI_GATEWAY_TOKEN` emitted by `neonctl env pull` / `neon dev`, or pass
  * `baseURL` / `apiKey` explicitly.
  */
@@ -88,9 +88,9 @@ function transformNeonRequestBody(
 
 export interface NeonProviderSettings {
 	/**
-	 * Neon AI Gateway base URL — the branch-scoped host root, e.g.
-	 * `https://<branch-id>-api.ai.<region>.aws.neon.tech`. The gateway paths are
-	 * appended internally. Falls back to the `NEON_AI_GATEWAY_BASE_URL` env var.
+	 * Neon AI Gateway host — the branch-scoped origin, e.g.
+	 * `https://<branch-id>-api.ai.<region>.aws.neon.tech`. Gateway paths are
+	 * appended internally. Falls back to the `NEON_AI_GATEWAY_HOST` env var.
 	 */
 	baseURL?: string;
 
@@ -131,9 +131,9 @@ export function createNeon(options: NeonProviderSettings = {}): NeonProvider {
 		withoutTrailingSlash(
 			loadSetting({
 				settingValue: options.baseURL,
-				environmentVariableName: "NEON_AI_GATEWAY_BASE_URL",
+				environmentVariableName: "NEON_AI_GATEWAY_HOST",
 				settingName: "baseURL",
-				description: "Neon AI Gateway base URL",
+				description: "Neon AI Gateway host",
 			}),
 		);
 

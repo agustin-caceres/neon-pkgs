@@ -607,8 +607,8 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		expect(env.aiGateway.baseUrl).toBe(
 			"https://br-cell-api.ai.c-3.aws-us-east-2.fake.neon.tech/ai-gateway/mlflow/v1",
 		);
-		// The bare-host alias (`NEON_AI_GATEWAY_BASE_URL`) must carry the cell too.
-		expect(toEntries(env).NEON_AI_GATEWAY_BASE_URL).toBe(
+		// The bare-host alias (`NEON_AI_GATEWAY_HOST`) must carry the cell too.
+		expect(toEntries(env).NEON_AI_GATEWAY_HOST).toBe(
 			"https://br-cell-api.ai.c-3.aws-us-east-2.fake.neon.tech",
 		);
 	});
@@ -734,6 +734,7 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		expect(env.aiGateway.baseUrl).toBe(
 			"https://x.neon.build/ai-gateway/mlflow/v1",
 		);
+		expect(env.aiGateway.host).toBe("https://x.neon.build");
 	});
 
 	test("parseEnv throws EnvNotInjected listing missing storage vars", () => {
@@ -768,6 +769,7 @@ describe("branch storage + AI Gateway (Preview)", () => {
 			aiGateway: {
 				apiKey: "nt_live_x_y",
 				baseUrl: "https://x.neon.build/ai-gateway/mlflow/v1",
+				host: "https://x.neon.build",
 			},
 		};
 		const pairs = toEntries(env);
@@ -784,6 +786,6 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		// Neon-branded aliases: same token, plus the bare branch gateway host (no path) —
 		// the @ai-sdk/neon provider appends the /ai-gateway/<dialect>/… routes itself.
 		expect(pairs.NEON_AI_GATEWAY_TOKEN).toBe("nt_live_x_y");
-		expect(pairs.NEON_AI_GATEWAY_BASE_URL).toBe("https://x.neon.build");
+		expect(pairs.NEON_AI_GATEWAY_HOST).toBe("https://x.neon.build");
 	});
 });

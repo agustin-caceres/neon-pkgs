@@ -17,7 +17,7 @@ npm install @neondatabase/ai-sdk-provider ai@^6
 The gateway URL is branch-scoped, so both values come from the Neon Console (your project → a branch → **AI Gateway** tab), or from `neonctl env pull` / `neon dev`:
 
 ```bash
-NEON_AI_GATEWAY_BASE_URL="https://<branch-id>-api.ai.<region>.aws.neon.tech"
+NEON_AI_GATEWAY_HOST="https://<branch-id>-api.ai.<region>.aws.neon.tech"
 NEON_AI_GATEWAY_TOKEN="nt_live_..."
 ```
 
@@ -27,7 +27,7 @@ NEON_AI_GATEWAY_TOKEN="nt_live_..."
 import { neon } from "@neondatabase/ai-sdk-provider/v1";
 import { generateText } from "ai";
 
-// Reads NEON_AI_GATEWAY_BASE_URL + NEON_AI_GATEWAY_TOKEN from the environment.
+// Reads NEON_AI_GATEWAY_HOST + NEON_AI_GATEWAY_TOKEN from the environment.
 const { text } = await generateText({
   model: neon("claude-haiku-4-5"), // or 'gpt-5-3-codex', etc.
   prompt: "Summarize Postgres for me.",
@@ -40,7 +40,7 @@ Or configure explicitly with `createNeon`:
 import { createNeon } from "@neondatabase/ai-sdk-provider/v1";
 
 const neon = createNeon({
-  baseURL: process.env.NEON_AI_GATEWAY_BASE_URL,
+  baseURL: process.env.NEON_AI_GATEWAY_HOST,
   apiKey: process.env.NEON_AI_GATEWAY_TOKEN,
 });
 ```
@@ -94,7 +94,7 @@ for await (const part of result.fullStream) {
 Against a live branch with AI Gateway enabled:
 
 ```bash
-cp .env.example .env   # fill NEON_AI_GATEWAY_BASE_URL + NEON_AI_GATEWAY_TOKEN from `neonctl env pull`
+cp .env.example .env   # fill NEON_AI_GATEWAY_HOST + NEON_AI_GATEWAY_TOKEN from `neonctl env pull`
 pnpm test:e2e
 ```
 

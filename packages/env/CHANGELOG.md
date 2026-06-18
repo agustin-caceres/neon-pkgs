@@ -4,7 +4,7 @@
 
 ### Minor Changes
 
-- `OPENAI_BASE_URL` now points at the unified MLflow chat-completions route (`/ai-gateway/mlflow/v1`) instead of the OpenAI Responses route. `NEON_AI_GATEWAY_BASE_URL` remains the bare host for building native dialect URLs (`/openai/v1`, `/anthropic/v1`, …).
+- `OPENAI_BASE_URL` now points at the unified MLflow chat-completions route (`/ai-gateway/mlflow/v1`) instead of the OpenAI Responses route. `NEON_AI_GATEWAY_HOST` is the bare branch gateway origin for building native dialect URLs (`/openai/v1`, `/anthropic/v1`, …). Renamed from the misleading `NEON_AI_GATEWAY_BASE_URL`.
 
 ## 0.6.0
 

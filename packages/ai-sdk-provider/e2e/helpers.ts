@@ -21,15 +21,15 @@ export type MatrixFamily = keyof typeof MATRIX_MODELS;
 export const REASONING_FAMILIES = new Set<MatrixFamily>(["openai", "codex"]);
 
 export function hasGatewayEnv(): boolean {
-	const baseUrl = process.env.NEON_AI_GATEWAY_BASE_URL?.trim();
+	const host = process.env.NEON_AI_GATEWAY_HOST?.trim();
 	const token = process.env.NEON_AI_GATEWAY_TOKEN?.trim();
-	return Boolean(baseUrl && token);
+	return Boolean(host && token);
 }
 
 export function assertGatewayEnv(): void {
 	if (!hasGatewayEnv()) {
 		throw new Error(
-			"NEON_AI_GATEWAY_BASE_URL and NEON_AI_GATEWAY_TOKEN are required. " +
+			"NEON_AI_GATEWAY_HOST and NEON_AI_GATEWAY_TOKEN are required. " +
 				"Create packages/ai-sdk-provider/.env (see .env.example) or export them before running pnpm test:e2e.",
 		);
 	}

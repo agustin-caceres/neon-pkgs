@@ -3,7 +3,7 @@ import { defineConfig } from "vitest/config";
 /**
  * End-to-end tests against a live Neon AI Gateway branch.
  *
- * Requires `NEON_AI_GATEWAY_BASE_URL` + `NEON_AI_GATEWAY_TOKEN` (see `.env.example`).
+ * Requires `NEON_AI_GATEWAY_HOST` + `NEON_AI_GATEWAY_TOKEN` (see `.env.example`).
  * Excluded from `test:ci` — run locally or in a gated workflow with secrets.
  */
 export default defineConfig({

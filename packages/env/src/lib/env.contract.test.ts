@@ -60,7 +60,7 @@ const OUTPUT_ONLY_ENV_VARS: ReadonlySet<string> = new Set([
 	"NEON_STORAGE_REGION",
 	"NEON_STORAGE_FORCE_PATH_STYLE",
 	"NEON_AI_GATEWAY_TOKEN",
-	"NEON_AI_GATEWAY_BASE_URL",
+	"NEON_AI_GATEWAY_HOST",
 ]);
 
 /**
@@ -82,7 +82,7 @@ describe("NEON_ENV_VAR_KEYS (public OS env-var names)", () => {
 			  "aiGateway": {
 			    "apiKey": "OPENAI_API_KEY",
 			    "baseUrl": "OPENAI_BASE_URL",
-			    "neonBaseUrl": "NEON_AI_GATEWAY_BASE_URL",
+			    "neonHost": "NEON_AI_GATEWAY_HOST",
 			    "neonToken": "NEON_AI_GATEWAY_TOKEN",
 			  },
 			  "auth": {
@@ -184,6 +184,7 @@ describe("toEntries → parseEnv round-trip (cross-process transport)", () => {
 			aiGateway: {
 				apiKey: "nt_live_abc_def",
 				baseUrl: "https://x.neon.build/ai-gateway/mlflow/v1",
+				host: "https://x.neon.build",
 			},
 		};
 

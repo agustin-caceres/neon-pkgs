@@ -83,15 +83,15 @@ export const NEON_ENV_VAR_KEYS = {
 	 * AI Gateway (Preview). Mapped onto the OpenAI SDK's standard env vars so the OpenAI
 	 * clients work from env alone; `baseUrl` carries the gateway's default MLflow chat route
 	 * (`/ai-gateway/mlflow/v1`). The `NEON_AI_GATEWAY_*` aliases are also emitted: `neonToken`
-	 * mirrors the OpenAI key, and `neonBaseUrl` is the bare branch gateway host
-	 * (`scheme://host`, no path) — the `@ai-sdk/neon` provider appends the
-	 * `/ai-gateway/<dialect>/…` routes itself (https://github.com/vercel/ai/pull/15997).
+	 * mirrors the OpenAI key, and `neonHost` is the bare branch gateway origin
+	 * (`scheme://host`, no path) — `@neondatabase/ai-sdk-provider` appends
+	 * `/ai-gateway/<dialect>/v1` routes itself.
 	 */
 	aiGateway: {
 		apiKey: "OPENAI_API_KEY",
 		baseUrl: "OPENAI_BASE_URL",
 		neonToken: "NEON_AI_GATEWAY_TOKEN",
-		neonBaseUrl: "NEON_AI_GATEWAY_BASE_URL",
+		neonHost: "NEON_AI_GATEWAY_HOST",
 	},
 } as const;
 
@@ -173,7 +173,10 @@ export interface NeonStorageEnv {
  */
 export interface NeonAiGatewayEnv {
 	apiKey: string;
+	/** Default MLflow chat client URL (`…/ai-gateway/mlflow/v1`). Maps to `OPENAI_BASE_URL`. */
 	baseUrl: string;
+	/** Bare branch gateway origin (`https://host`). Maps to `NEON_AI_GATEWAY_HOST`. */
+	host: string;
 }
 
 /**
@@ -619,11 +622,11 @@ export async function fetchEnv<const C extends Config>(
 			} satisfies NeonStorageEnv;
 		}
 		if (wantsAiGateway) {
+			const host = aiGatewayHostUrl(branch.id, unpooled.uri);
 			result.aiGateway = {
 				apiKey: secrets.apiToken,
-				// Branch-scoped gateway host derived from the branch's connection URI — not the
-				// control-plane API origin (which doesn't serve the gateway).
 				baseUrl: aiGatewayBaseUrl(branch.id, unpooled.uri),
+				host,
 			} satisfies NeonAiGatewayEnv;
 		}
 	}
@@ -730,9 +733,14 @@ function aiGatewayHost(branchId: string, connectionUri: string): string {
 	return `${branchId}-api.ai.${suffix}`;
 }
 
+/** Full gateway origin URL (`https://<branchId>-api.ai.<suffix>`). */
+function aiGatewayHostUrl(branchId: string, connectionUri: string): string {
+	return `https://${aiGatewayHost(branchId, connectionUri)}`;
+}
+
 /** The AI Gateway default chat base URL (`OPENAI_BASE_URL`) on the branch gateway host. */
 function aiGatewayBaseUrl(branchId: string, connectionUri: string): string {
-	return `https://${aiGatewayHost(branchId, connectionUri)}${AI_GATEWAY_DEFAULT_PATH}`;
+	return `${aiGatewayHostUrl(branchId, connectionUri)}${AI_GATEWAY_DEFAULT_PATH}`;
 }
 
 /**
@@ -1143,9 +1151,13 @@ export function parseEnv(
 			OPENAI_BASE_URL: source.OPENAI_BASE_URL,
 		});
 		if (aiGateway.success) {
+			const baseUrl = aiGateway.data.OPENAI_BASE_URL;
+			const host =
+				source.NEON_AI_GATEWAY_HOST?.trim() || new URL(baseUrl).origin;
 			result.aiGateway = {
 				apiKey: aiGateway.data.OPENAI_API_KEY,
-				baseUrl: aiGateway.data.OPENAI_BASE_URL,
+				baseUrl,
+				host,
 			} satisfies NeonAiGatewayEnv;
 		} else {
 			for (const issue of aiGateway.error.issues)
@@ -1323,7 +1335,7 @@ export function toEntries(env: NeonEnv<Config>): Record<string, string> {
 		// (scheme://host, no path) — the @ai-sdk/neon provider appends the
 		// /ai-gateway/<dialect>/… routes itself (https://github.com/vercel/ai/pull/15997).
 		out[keys.neonToken] = ai.apiKey;
-		out[keys.neonBaseUrl] = new URL(ai.baseUrl).origin;
+		out[keys.neonHost] = ai.host;
 	}
 	return out;
 }
