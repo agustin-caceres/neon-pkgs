@@ -559,7 +559,7 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		expect("aiGateway" in env).toBe(false);
 	});
 
-	test("aiGateway policy surfaces the OpenAI env (key + OpenAI-dialect base URL)", async () => {
+	test("aiGateway policy surfaces the OpenAI env (key + MLflow chat base URL)", async () => {
 		const { api, projectId } = seededFake();
 		const env = await fetchEnv(
 			defineConfig({ preview: { aiGateway: true } }),
@@ -576,7 +576,7 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		expect(env.aiGateway.apiKey).toMatch(/^nt_live_/);
 		// Branch-scoped gateway host derived from the branch connection URI, NOT the API origin.
 		expect(env.aiGateway.baseUrl).toBe(
-			"https://br-main-api.ai.aws-us-east-1.fake.neon.tech/ai-gateway/openai/v1",
+			"https://br-main-api.ai.aws-us-east-1.fake.neon.tech/ai-gateway/mlflow/v1",
 		);
 		expect("storage" in env).toBe(false);
 	});
@@ -605,7 +605,7 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		);
 
 		expect(env.aiGateway.baseUrl).toBe(
-			"https://br-cell-api.ai.c-3.aws-us-east-2.fake.neon.tech/ai-gateway/openai/v1",
+			"https://br-cell-api.ai.c-3.aws-us-east-2.fake.neon.tech/ai-gateway/mlflow/v1",
 		);
 		// The bare-host alias (`NEON_AI_GATEWAY_BASE_URL`) must carry the cell too.
 		expect(toEntries(env).NEON_AI_GATEWAY_BASE_URL).toBe(
@@ -727,12 +727,12 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		vi.stubEnv("OPENAI_API_KEY", "nt_live_abc_def");
 		vi.stubEnv(
 			"OPENAI_BASE_URL",
-			"https://x.neon.build/ai-gateway/openai/v1",
+			"https://x.neon.build/ai-gateway/mlflow/v1",
 		);
 		const env = parseEnv(defineConfig({ preview: { aiGateway: true } }));
 		expect(env.aiGateway.apiKey).toBe("nt_live_abc_def");
 		expect(env.aiGateway.baseUrl).toBe(
-			"https://x.neon.build/ai-gateway/openai/v1",
+			"https://x.neon.build/ai-gateway/mlflow/v1",
 		);
 	});
 
@@ -767,7 +767,7 @@ describe("branch storage + AI Gateway (Preview)", () => {
 			},
 			aiGateway: {
 				apiKey: "nt_live_x_y",
-				baseUrl: "https://x.neon.build/ai-gateway/openai/v1",
+				baseUrl: "https://x.neon.build/ai-gateway/mlflow/v1",
 			},
 		};
 		const pairs = toEntries(env);
@@ -779,7 +779,7 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		expect(pairs.NEON_STORAGE_FORCE_PATH_STYLE).toBe("true");
 		expect(pairs.OPENAI_API_KEY).toBe("nt_live_x_y");
 		expect(pairs.OPENAI_BASE_URL).toBe(
-			"https://x.neon.build/ai-gateway/openai/v1",
+			"https://x.neon.build/ai-gateway/mlflow/v1",
 		);
 		// Neon-branded aliases: same token, plus the bare branch gateway host (no path) —
 		// the @ai-sdk/neon provider appends the /ai-gateway/<dialect>/… routes itself.

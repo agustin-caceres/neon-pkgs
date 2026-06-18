@@ -81,8 +81,8 @@ export const NEON_ENV_VAR_KEYS = {
 	},
 	/**
 	 * AI Gateway (Preview). Mapped onto the OpenAI SDK's standard env vars so the OpenAI
-	 * clients work from env alone; `baseUrl` carries the gateway's OpenAI-dialect route prefix
-	 * (`/ai-gateway/openai/v1`). The `NEON_AI_GATEWAY_*` aliases are also emitted: `neonToken`
+	 * clients work from env alone; `baseUrl` carries the gateway's default MLflow chat route
+	 * (`/ai-gateway/mlflow/v1`). The `NEON_AI_GATEWAY_*` aliases are also emitted: `neonToken`
 	 * mirrors the OpenAI key, and `neonBaseUrl` is the bare branch gateway host
 	 * (`scheme://host`, no path) — the `@ai-sdk/neon` provider appends the
 	 * `/ai-gateway/<dialect>/…` routes itself (https://github.com/vercel/ai/pull/15997).
@@ -95,8 +95,8 @@ export const NEON_ENV_VAR_KEYS = {
 	},
 } as const;
 
-/** OpenAI-dialect route prefix on the branch AI Gateway host. */
-const AI_GATEWAY_OPENAI_PATH = "/ai-gateway/openai/v1";
+/** Default unified chat-completions route on the branch AI Gateway host (MLflow). */
+const AI_GATEWAY_DEFAULT_PATH = "/ai-gateway/mlflow/v1";
 
 /**
  * Branch identity for the resolved branch. Always present on a `fetchEnv` result (the branch
@@ -167,8 +167,8 @@ export interface NeonStorageEnv {
 /**
  * AI Gateway access for the branch (Preview). Present on `NeonEnv` only when the policy
  * enables `preview.aiGateway`. `apiKey` is the minted credential's bearer (`api_token`);
- * `baseUrl` is the gateway's OpenAI-dialect endpoint on the branch-scoped gateway host
- * (`https://<branchId>-api.ai.<region>.…/ai-gateway/openai/v1`). Projects to the OpenAI SDK's
+ * `baseUrl` is the gateway's default MLflow chat endpoint on the branch-scoped gateway host
+ * (`https://<branchId>-api.ai.<region>.…/ai-gateway/mlflow/v1`). Projects to the OpenAI SDK's
  * standard env (`OPENAI_API_KEY`, `OPENAI_BASE_URL`), plus the `NEON_AI_GATEWAY_*` aliases.
  */
 export interface NeonAiGatewayEnv {
@@ -730,9 +730,9 @@ function aiGatewayHost(branchId: string, connectionUri: string): string {
 	return `${branchId}-api.ai.${suffix}`;
 }
 
-/** The AI Gateway's OpenAI-dialect base URL (`OPENAI_BASE_URL`) on the branch gateway host. */
+/** The AI Gateway default chat base URL (`OPENAI_BASE_URL`) on the branch gateway host. */
 function aiGatewayBaseUrl(branchId: string, connectionUri: string): string {
-	return `https://${aiGatewayHost(branchId, connectionUri)}${AI_GATEWAY_OPENAI_PATH}`;
+	return `https://${aiGatewayHost(branchId, connectionUri)}${AI_GATEWAY_DEFAULT_PATH}`;
 }
 
 /**
