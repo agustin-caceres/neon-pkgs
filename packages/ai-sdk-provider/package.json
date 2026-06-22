@@ -1,6 +1,6 @@
 {
 	"name": "@neondatabase/ai-sdk-provider",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"description": "Community Vercel AI SDK provider for the Neon AI Gateway.",
 	"keywords": [
 		"neon",
@@ -29,11 +29,6 @@
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js",
 			"default": "./dist/index.js"
-		},
-		"./v1": {
-			"types": "./dist/v1.d.ts",
-			"import": "./dist/v1.js",
-			"default": "./dist/v1.js"
 		}
 	},
 	"files": [
@@ -68,11 +63,11 @@
 		"provenance": false
 	},
 	"dependencies": {
-		"@ai-sdk/anthropic": "3.0.82",
-		"@ai-sdk/openai": "3.0.69",
-		"@ai-sdk/openai-compatible": "2.0.48",
-		"@ai-sdk/provider": "3.0.10",
-		"@ai-sdk/provider-utils": "4.0.27"
+		"@ai-sdk/anthropic": "^3.0.82",
+		"@ai-sdk/openai": "^3.0.69",
+		"@ai-sdk/openai-compatible": "^2.0.48",
+		"@ai-sdk/provider": "^3.0.10",
+		"@ai-sdk/provider-utils": "^4.0.27"
 	},
 	"peerDependencies": {
 		"ai": "^6.0.0",
