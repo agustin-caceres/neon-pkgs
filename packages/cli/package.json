@@ -1,7 +1,7 @@
 {
-  "name": "neon",
+  "name": "neonctl",
   "version": "2.27.0",
-  "description": "The Neon CLI — manage Neon Serverless Postgres from the terminal",
+  "description": "CLI tool for Neon Serverless Postgres",
   "keywords": [
     "neon",
     "neonctl",
@@ -22,6 +22,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
+    "neonctl": "dist/cli.js",
     "neon": "dist/cli.js"
   },
   "files": [

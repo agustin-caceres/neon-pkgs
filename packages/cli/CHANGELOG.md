@@ -1,8 +1,7 @@
-# neon
+# neonctl
 
 ## 2.27.0
 
-### Initial monorepo release
+### Moved into the monorepo
 
-- Migrated the Neon CLI source from [`neondatabase/neonctl`](https://github.com/neondatabase/neonctl) into `neon-pkgs` as `packages/cli`, published as the `neon` package.
-- Functionally identical to `neonctl@2.27.0`; the binary is now named `neon`.
+- Migrated the Neon CLI source from [`neondatabase/neonctl`](https://github.com/neondatabase/neonctl) into `neon-pkgs` as `packages/cli`. No functional changes — still published as `neonctl` with the `neonctl` and `neon` binaries.
