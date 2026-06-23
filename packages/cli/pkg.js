@@ -27,6 +27,12 @@ await bundle.close();
 
 const pkgJson = JSON.parse(readFileSync('package.json', 'utf8'));
 delete pkgJson.type;
+// The published package runs from the package root, so its `bin` points at
+// `dist/cli.js`. pkg compiles the Rollup output that lands at `bundle/cli.js`,
+// so rewrite `bin` to that entry (and drop `main`) for the standalone build.
+const binName = typeof pkgJson.bin === 'string' ? 'neon' : Object.keys(pkgJson.bin)[0];
+pkgJson.bin = { [binName]: 'cli.js' };
+delete pkgJson.main;
 
 pkgJson.pkg.assets.forEach((asset) => {
   cpSync(join('dist', asset), join('bundle', asset));
