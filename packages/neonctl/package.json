@@ -1,0 +1,51 @@
+{
+	"name": "neonctl",
+	"version": "2.27.0",
+	"description": "Compatibility alias for the Neon CLI — forwards to `neon`",
+	"keywords": [
+		"neon",
+		"neonctl",
+		"cli",
+		"postgres",
+		"database"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/neondatabase/neon-pkgs.git"
+	},
+	"license": "Apache-2.0",
+	"author": {
+		"name": "Neon",
+		"url": "https://neon.com"
+	},
+	"type": "module",
+	"bin": {
+		"neonctl": "dist/cli.js"
+	},
+	"files": [
+		"README.md",
+		"dist/",
+		"package.json"
+	],
+	"scripts": {
+		"build": "tsc --noEmit && tsdown",
+		"test": "vitest --passWithNoTests",
+		"test:ci": "vitest run --passWithNoTests",
+		"tsc": "tsc"
+	},
+	"dependencies": {
+		"neon": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "catalog:",
+		"tsdown": "catalog:",
+		"typescript": "catalog:",
+		"vitest": "catalog:"
+	},
+	"engines": {
+		"node": ">=18"
+	},
+	"publishConfig": {
+		"provenance": false
+	}
+}

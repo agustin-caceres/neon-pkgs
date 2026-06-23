@@ -1,11 +1,15 @@
+# Neon CLI (`neon`)
+
 The Neon CLI is a command-line interface that lets you manage [Neon Serverless Postgres](https://neon.tech/) directly from the terminal. For the complete documentation, see [Neon CLI](https://neon.tech/docs/reference/neon-cli).
+
+> Published as **`neon`**. The legacy [`neonctl`](https://www.npmjs.com/package/neonctl) package continues to work and forwards to `neon`.
 
 ## Install the Neon CLI
 
 **npm**
 
 ```shell
-npm i -g neonctl
+npm i -g neon
 ```
 
 Requires Node.js 18.0 or higher.
