@@ -87,6 +87,7 @@
     "@types/prompts": "2.4.9",
     "@types/which": "3.0.4",
     "@types/yargs": "17.0.32",
+    "@vitest/coverage-v8": "1.6.1",
     "@yao-pkg/pkg": "6.10.0",
     "emocks": "3.0.4",
     "eslint": "9.29.0",
