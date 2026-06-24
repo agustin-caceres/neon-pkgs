@@ -5,6 +5,7 @@
 			"**/*.ts",
 			"**/*.tsx",
 			"!**/routeTree.gen.ts",
+			"!packages/sdk/src/client",
 			"!examples",
 			"!packages/cli"
 		]
