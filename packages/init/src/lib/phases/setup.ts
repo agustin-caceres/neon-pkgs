@@ -6,7 +6,9 @@ import { resolveAddMcpAgentId } from "../agents.js";
 import {
 	FALLBACK_TEMPLATES,
 	fetchTemplates,
+	findTemplate,
 	type NeonFeature,
+	scaffoldTemplate,
 } from "../bootstrap.js";
 import {
 	detectIde,
@@ -128,7 +130,12 @@ export async function handleSetupPhase(
 }
 
 function buildTemplatePreference(
-	templates: { id: string; title: string; description: string }[],
+	templates: {
+		id: string;
+		title: string;
+		description: string;
+		tools?: string[];
+	}[],
 ) {
 	return [
 		{
@@ -137,10 +144,16 @@ function buildTemplatePreference(
 				"No application was detected in this directory. Would you like to scaffold a new project from a template?",
 			phase: "before_checks" as const,
 			options: [
-				...templates.map((t) => ({
-					value: t.id,
-					label: `${t.title} — ${t.description}`,
-				})),
+				...templates.map((t) => {
+					const tools =
+						t.tools && t.tools.length > 0
+							? ` (${t.tools.join(", ")})`
+							: "";
+					return {
+						value: t.id,
+						label: `${t.title}${tools} — ${t.description}`,
+					};
+				}),
 				{
 					value: "none",
 					label: "No thanks — continue without scaffolding",
@@ -627,22 +640,14 @@ async function executeBatchedInstallation(
 	// Step 0: Bootstrap project from template if specified
 	if (isBootstrap && options.template) {
 		try {
-			// Pin @latest (and -y) so a stale globally-installed neonctl can't be
-			// picked up by npx — bootstrap's rate-limit fix lives in recent
-			// neonctl, and this runs before ensureNeonctl() updates the global.
-			await execa(
-				"npx",
-				[
-					"-y",
-					"neonctl@latest",
-					"bootstrap",
-					".",
-					"--template",
-					options.template,
-					"--force",
-				],
-				{ stdio: "pipe", timeout: 120000 },
-			);
+			const templates = await fetchTemplates();
+			const template =
+				findTemplate(templates, options.template) ??
+				findTemplate(FALLBACK_TEMPLATES, options.template);
+			if (!template) {
+				throw new Error(`Unknown template "${options.template}".`);
+			}
+			await scaffoldTemplate(template, ".");
 			results.push({
 				id: "bootstrap",
 				description: `Scaffolded project from template "${options.template}"`,

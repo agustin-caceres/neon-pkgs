@@ -17,7 +17,7 @@ beforeEach(() => stubCleanNeonEnv());
 //      filter types. Adding a var to one and forgetting the others means `parseEnv` silently
 //      stops validating / returning it.
 //   3. The `toEntries` → `parseEnv` round-trip (the cross-process transport contract).
-//   4. The public value-export surface of `@neondatabase/env/v1`.
+//   4. The public value-export surface of `@neondatabase/env`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -51,14 +51,12 @@ const INPUT_ENV_KEYS = [
 
 /**
  * Env-vars `toEntries` emits but `parseEnv` never reads back: the branch name (optional), the
- * derived storage flag, the Neon-specific region alias, and the AI-gateway aliases. Listed so
- * the completeness check below can prove every *other* env-var in `NEON_ENV_VAR_KEYS` is a
- * covered input — i.e. adding a new input var without a test fails loudly.
+ * Neon-specific region alias, and the AI-gateway aliases. Listed so the completeness check
+ * below can prove every *other* env-var in `NEON_ENV_VAR_KEYS` is a covered input — i.e.
+ * adding a new input var without a test fails loudly.
  */
 const OUTPUT_ONLY_ENV_VARS: ReadonlySet<string> = new Set([
 	"NEON_BRANCH",
-	"NEON_STORAGE_REGION",
-	"NEON_STORAGE_FORCE_PATH_STYLE",
 	"NEON_AI_GATEWAY_TOKEN",
 	"NEON_AI_GATEWAY_BASE_URL",
 ]);
@@ -102,9 +100,7 @@ describe("NEON_ENV_VAR_KEYS (public OS env-var names)", () => {
 			  "storage": {
 			    "accessKeyId": "AWS_ACCESS_KEY_ID",
 			    "endpoint": "AWS_ENDPOINT_URL_S3",
-			    "forcePathStyle": "NEON_STORAGE_FORCE_PATH_STYLE",
 			    "region": "AWS_REGION",
-			    "regionNeon": "NEON_STORAGE_REGION",
 			    "secretAccessKey": "AWS_SECRET_ACCESS_KEY",
 			  },
 			}
@@ -179,7 +175,6 @@ describe("toEntries → parseEnv round-trip (cross-process transport)", () => {
 				secretAccessKey: "s".repeat(64),
 				endpoint: "https://br.storage.neon.build",
 				region: "us-east-2",
-				forcePathStyle: true,
 			},
 			aiGateway: {
 				apiKey: "nt_live_abc_def",
@@ -197,9 +192,9 @@ describe("toEntries → parseEnv round-trip (cross-process transport)", () => {
 	});
 });
 
-describe("@neondatabase/env/v1 public surface", () => {
+describe("@neondatabase/env public surface", () => {
 	test("value exports are stable (removing/renaming one is a breaking change)", async () => {
-		const surface = await import("../v1.js");
+		const surface = await import("../index.js");
 		expect(Object.keys(surface).sort()).toMatchInlineSnapshot(`
 			[
 			  "NEON_ENV_VAR_KEYS",
@@ -208,13 +203,5 @@ describe("@neondatabase/env/v1 public surface", () => {
 			  "toEntries",
 			]
 		`);
-	});
-
-	test("the default entry point re-exports exactly the v1 surface", async () => {
-		const [v1, index] = await Promise.all([
-			import("../v1.js"),
-			import("../index.js"),
-		]);
-		expect(Object.keys(index).sort()).toEqual(Object.keys(v1).sort());
 	});
 });

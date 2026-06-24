@@ -1,5 +1,9 @@
 /**
- * The default entry point re-exports the latest stable version. New consumers should import
- * directly from `@neondatabase/functions/v1` to opt in to a specific major.
+ * `@neondatabase/functions` — runtime helpers for Neon Functions.
+ *
+ * - `waitUntil(promise)` — defers async work past the response by handing the promise to
+ *   the current invocation context. No-op off-platform (local dev, tests, non-Neon hosts).
+ *   Mirrors `@vercel/functions`.
  */
-export * from "./v1.js";
+
+export { waitUntil } from "./lib/wait-until.js";

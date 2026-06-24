@@ -56,7 +56,8 @@ export interface NeonDataApiEnv {
 /**
  * S3-compatible object-storage access for the branch (Preview). Present only when the policy
  * declares `preview.buckets`. Projects to the AWS SDK's standard env (`AWS_ACCESS_KEY_ID`,
- * `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`).
+ * `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`). Neon's storage gateway always
+ * requires path-style addressing, so set `forcePathStyle: true` on your S3 client.
  */
 export interface NeonStorageEnv {
 	accessKeyId: string;
@@ -65,8 +66,6 @@ export interface NeonStorageEnv {
 	endpoint: string;
 	/** AWS region string (e.g. `us-east-2`). */
 	region: string;
-	/** Whether the S3 client must use path-style addressing (always `true` today). */
-	forcePathStyle: boolean;
 }
 
 /**
