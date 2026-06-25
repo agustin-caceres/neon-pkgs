@@ -1,16 +1,13 @@
 # @neon/sdk
 
-The official TypeScript SDK for the [Neon API](https://api-docs.neon.tech/reference) — a modern, Fetch-based client generated from Neon's [OpenAPI specification](https://neon.com/api_spec/release/v2.json).
+The official TypeScript SDK for the [Neon API](https://api-docs.neon.tech/reference) — a modern, **Fetch-based**, **zero-dependency**, ESM-only client generated from Neon's [OpenAPI specification](https://neon.com/api_spec/release/v2.json). Successor to [`@neondatabase/api-client`](https://www.npmjs.com/package/@neondatabase/api-client).
 
-This is the successor to [`@neondatabase/api-client`](https://www.npmjs.com/package/@neondatabase/api-client). It drops the `axios` dependency in favor of the platform `fetch`, so it runs unchanged on Node.js, Bun, Deno, edge runtimes, and the browser.
+Two layers, one package:
 
-It ships two layers in one package:
+- **`createNeonClient`** — an ergonomic client (auth once, `{ data, error }` results, typed errors, retries, readiness polling, auto-pagination, workflows), organized into resource namespaces.
+- **`raw`** — the full generated 1:1 surface: every endpoint as a standalone, tree-shakeable function. Also at the `@neon/sdk/raw` subpath.
 
-- **`createNeonClient`** — an ergonomic client: authenticate once, get `{ data, error }`
-  results (or opt into throwing), automatic retries, readiness polling, auto-pagination,
-  and typed errors, organized into resource namespaces.
-- **`raw`** — the full generated 1:1 surface: every endpoint as a standalone,
-  tree-shakeable function. Also available at the `@neon/sdk/raw` subpath.
+---
 
 ## Install
 
@@ -18,85 +15,256 @@ It ships two layers in one package:
 npm install @neon/sdk
 ```
 
-Requires Node.js >= 22 (or any runtime with a global `fetch`).
+Requires Node.js ≥ 22 (or any runtime with a global `fetch` — Bun, Deno, edge, browser).
 
-## Usage
-
-Get an API key from the [Neon Console](https://console.neon.tech/app/settings#api-keys), then create a client:
+## Quick start
 
 ```ts
 import { createNeonClient } from "@neon/sdk";
 
 const neon = createNeonClient({ apiKey: process.env.NEON_API_KEY! });
 
-const { data, error } = await neon.projects.list().all();
-if (error) {
-	// error is a typed NeonError union — switch on error.kind
-	throw error;
-}
-console.log(data);
+// create a project and get a ready-to-use connection string
+const { data, error } = await neon.projects.createAndConnect({ name: "my-app" });
+if (error) throw error;
+const { project, connectionString } = data;
 ```
 
-Every method returns `{ data, error }` by default — no `try/catch` required. The `error`
-channel carries a typed `NeonError` (`NeonApiError`, `NeonNotFoundError`, …) you can branch
-on via `error.kind` or `instanceof`.
+---
 
-### `throwOnError`
+## Client configuration
 
-Prefer exceptions? Set it on the client (it **narrows the return types** to the bare
-resource) or per call:
+`createNeonClient(config)`:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `apiKey` | `string \| (() => string \| Promise<string>)` | — (required) | Neon API key, or a function returning it (sync/async). Sent as a Bearer token. |
+| `throwOnError` | `boolean` | `false` | When `true`, methods return the resource directly and **throw** on error. When `false`, they return `{ data, error }`. **Narrows return types** at the type level. |
+| `waitForReadiness` | `boolean` | `false` | When `true`, mutations block until their provisioning `operations` finish, so the returned resource is ready to use. |
+| `wait` | `{ pollIntervalMs?: number; timeoutMs?: number }` | `1000` / `300000` | Tuning for the readiness poller. |
+| `retries` | `number` | `2` | Automatic retries on always-safe statuses (`423`, `429`, `503`) with backoff. |
+| `orgId` | `string` | — | Default organization, applied to project create/list and as the transfer source org. Overridable per call. |
+| `baseUrl` | `string` | `https://console.neon.tech/api/v2` | Override the API base URL. |
+| `fetch` | `typeof fetch` | global `fetch` | Custom fetch implementation (proxies, tests, non-global runtimes). |
+
+Every option except `apiKey` is also accepted **per call** via the last `options` argument (`{ throwOnError?, waitForReadiness?, signal? }`), overriding the client default.
+
+## The result model
+
+By default every method resolves to a discriminated `{ data, error }` envelope — no `try/catch` needed:
+
+```ts
+const { data, error } = await neon.projects.get("late-frost-12345");
+if (error) {
+  // error is a typed NeonError union
+  return;
+}
+data; // narrowed to Project
+```
+
+Set `throwOnError` (on the client or per call) to get the bare resource and throw instead — and the **return types narrow accordingly**:
 
 ```ts
 const neon = createNeonClient({ apiKey, throwOnError: true });
-const project = await neon.projects.get("late-frost-12345"); // Project, throws on error
-
-// or per call, on a default client:
-const created = await neon.projects.create({ name: "my-app" }, { throwOnError: true });
+const project = await neon.projects.get("…");                 // Project (throws on error)
+const res     = await neon.projects.get("…", { throwOnError: false }); // { data, error }
 ```
 
-### Readiness polling
+## Errors
 
-Neon mutations are asynchronous (they return provisioning `operations`). Set
-`waitForReadiness` to block until those finish, so the resource is usable when the call
-resolves:
+The `error` channel carries a typed hierarchy (all `Error` subclasses with a `kind` discriminant); the same value is thrown when `throwOnError` is set.
+
+| Class | `kind` | Notable fields |
+| --- | --- | --- |
+| `NeonError` | (base) | `message`, `kind` |
+| `NeonApiError` | `"api"` | `status`, `code`, `requestId`, `response`, `body` |
+| `NeonNotFoundError` | `"not_found"` | (404) — extends `NeonApiError` |
+| `NeonAuthError` | `"auth"` | (401/403) |
+| `NeonRateLimitError` | `"rate_limit"` | (429, after retries) |
+| `NeonOperationError` | `"operation"` | `operationId`, `status` — an awaited operation failed |
+| `NeonTimeoutError` | `"timeout"` | readiness/wait deadline exceeded |
+| `NeonNetworkError` | `"network"` | transport failure (no response) |
+| `NeonError` | `"client"` | SDK-side errors (e.g. ambiguous connection-string selection) |
 
 ```ts
-const neon = createNeonClient({ apiKey, waitForReadiness: true });
-const { data: project } = await neon.projects.create({ name: "my-app" }); // ready
+const { error } = await neon.branches.get(pid, "nope");
+if (error?.kind === "not_found") { /* … */ }
 ```
 
-The primitive is also exposed: `await neon.operations.waitFor(operations)`.
+## Pagination
 
-### Pagination
-
-`list()` returns a lazy, cursor-paginated list:
+Cursor-paginated `list()` methods return a lazy `Paginated<T>`:
 
 ```ts
-const { data: all } = await neon.projects.list().all(); // every page
-for await (const project of neon.projects.list()) { /* stream, throws on error */ }
+const { data: all } = await neon.projects.list().all();      // every page → { data, error }
+const { data: page } = await neon.projects.list().page();    // one page
+for await (const project of neon.projects.list()) { … }      // stream; throws on a page error
 ```
 
-### Dropping to the raw layer
+## Readiness & workflows
 
-Every endpoint is available 1:1 — reach it as a namespace or via the subpath, reusing the
-client's auth through `neon.client`:
+Neon mutations are asynchronous (they return `operations`). `waitForReadiness` blocks until they settle; the **workflow** methods (`createAndConnect`, `createWithCompute`) default it on and hand back a connection string in one call. The primitive is `neon.operations.waitFor(operations)`.
+
+---
+
+## API reference
+
+Legend: **[P]** returns `Paginated<T>` · **[W]** workflow (multi-step) · **→void** resolves to `void`. Unless noted, methods take an optional trailing `options` arg and resolve to the resource (or `{ data, error }`).
+
+### `neon.projects`
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `list(query?)` | **[P]** `ProjectListItem` | `query`: `{ search?, org_id?, limit? }` (cursor managed for you) |
+| `get(id)` | `Project` | |
+| `create(input?)` | `Project` | `input`: `{ name?, region_id?, pg_version?, org_id?, autoscaling_limit_min_cu?, autoscaling_limit_max_cu?, settings? }` |
+| `createAndConnect(input?, { pooled? })` | **[W]** `{ project, connectionString }` | one call + readiness; `pooled` default `true` |
+| `update(id, input)` | `Project` | `input`: `{ name?, settings? }` |
+| `delete(id)` | `Project` | |
+| `transfer({ fromOrgId?, toOrgId, projectIds })` | **→void** | `fromOrgId` defaults to client `orgId` |
+| `transferFromUser({ toOrgId, projectIds })` | **→void** | personal account → org |
+
+### `neon.branches`
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `list(projectId, query?)` | **[P]** `Branch` | `query`: `{ search?, sort_by?, sort_order? }` |
+| `get(projectId, branchId)` | `Branch` | |
+| `create(projectId, input?)` | `Branch` | `input`: `{ name?, parent_id?, parent_lsn?, parent_timestamp?, protected? }` |
+| `update(projectId, branchId, input)` | `Branch` | `input`: `{ name?, protected?, expires_at? }` |
+| `delete(projectId, branchId)` | **→void** | |
+| `createWithCompute(projectId, input, { pooled? })` | **[W]** `{ branch, endpoint, connectionString }` | `input`: `{ name?, parentId?, compute?: { minCu?, maxCu?, suspendTimeoutSeconds? } }` |
+| `getDefault(projectId)` | `Branch` | resolves the default branch by the `default` flag |
+| `setDefault(projectId, branchId)` | `Branch` | |
+| `finalizeRestore(projectId, branchId, { name? }?)` | **→void** | commits a restore previewed with `snapshots.restore({ finalize: false })` |
+
+### `neon.postgres`
+
+The Postgres data plane of a branch. `neon.postgres.connectionString(params, options?)` resolves a URI, **auto-selecting** the default branch and the sole role/database when omitted:
+
+```ts
+const { data: uri } = await neon.postgres.connectionString({
+  projectId,
+  branchId?, endpointId?, databaseName?, roleName?, pooled?,  // all optional; pooled default true
+});
+```
+
+#### `neon.postgres.endpoints`
+
+| Method | Returns |
+| --- | --- |
+| `list(projectId)` | `Endpoint[]` |
+| `get(projectId, endpointId)` | `Endpoint` |
+| `create(projectId, input)` | `Endpoint` — `input`: `{ branch_id, type, autoscaling_limit_min_cu?, autoscaling_limit_max_cu?, suspend_timeout_seconds?, provisioner? }` |
+| `update(projectId, endpointId, input)` | `Endpoint` |
+| `delete(projectId, endpointId)` | **→void** |
+| `start` / `suspend` / `restart(projectId, endpointId)` | `Endpoint` |
+
+#### `neon.postgres.roles`
+
+| Method | Returns |
+| --- | --- |
+| `list(projectId, branchId)` | `Role[]` |
+| `get(projectId, branchId, name)` | `Role` |
+| `create(projectId, branchId, { name, no_login? })` | `Role` |
+| `delete(projectId, branchId, name)` | **→void** |
+| `password(projectId, branchId, name)` | `string` (reveals the password) |
+| `resetPassword(projectId, branchId, name)` | `Role` (carries the new password) |
+
+#### `neon.postgres.databases`
+
+| Method | Returns |
+| --- | --- |
+| `list(projectId, branchId)` | `Database[]` |
+| `get(projectId, branchId, name)` | `Database` |
+| `create(projectId, branchId, { name, owner_name })` | `Database` |
+| `update(projectId, branchId, name, { name?, owner_name? })` | `Database` |
+| `delete(projectId, branchId, name)` | **→void** |
+
+#### `neon.postgres.dataApi`
+
+| Method | Returns |
+| --- | --- |
+| `get(projectId, branchId, databaseName)` | `DataApiReponse` |
+| `create(projectId, branchId, databaseName, input?)` | `DataApiCreateResponse` |
+| `update(projectId, branchId, databaseName, input?)` | **→void** |
+| `delete(projectId, branchId, databaseName)` | **→void** |
+
+### `neon.snapshots`
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `list(projectId)` | `Snapshot[]` | |
+| `create(projectId, branchId, input?)` | `Snapshot` | `input`: `{ name?, timestamp?, lsn?, expiresAt? }` (point-in-time) |
+| `update(projectId, snapshotId, { name? })` | `Snapshot` | |
+| `delete(projectId, snapshotId)` | **→void** | |
+| `restore(projectId, snapshotId, input?)` | `Branch` | see below |
+| `getSchedule(projectId, branchId)` | `BackupSchedule` | |
+| `setSchedule(projectId, branchId, schedule)` | **→void** | |
+
+`restore` input: `{ name?, targetBranchId?, finalize?, preview?, keepOnAbort? }`.
+- Restoring **as a new branch** (no `targetBranchId`) finalizes by default → ready to use.
+- Restoring **onto an existing branch** doesn't finalize by default, so you can preview first.
+- **Transaction-style** with `preview`: it restores un-finalized, runs your callback against the restored branch, then **finalizes (commit)** if it returns `true` or **deletes the preview branch (abort)** if `false` (unless `keepOnAbort`):
+
+```ts
+await neon.snapshots.restore(projectId, snapshotId, {
+  targetBranchId,
+  preview: async (branch) => (await checks(branch)) === "ok", // true → commit · false → abort
+});
+```
+
+### `neon.operations`
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `list(projectId)` | **[P]** `Operation` | |
+| `get(projectId, operationId)` | `Operation` | |
+| `waitFor(operations, options?)` | **→void** | `options`: `{ pollIntervalMs?, timeoutMs?, signal? }` — the readiness primitive |
+
+### `neon.consumption`
+
+Cursor-paginated billing metrics. Each takes `{ from, to, granularity, project_ids?, org_id? }` (`perBranchV2` requires `project_ids`).
+
+| Method | Returns |
+| --- | --- |
+| `perProject(query)` | **[P]** `ConsumptionHistoryPerProject` |
+| `perProjectV2(query)` | **[P]** `ConsumptionHistoryPerProjectV2` |
+| `perBranchV2(query)` | **[P]** `ConsumptionHistoryPerBranchV2` |
+
+### `neon.apiKeys`
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `list()` | `ApiKeysListResponseItem[]` | |
+| `create(keyName)` | `ApiKeyCreateResponse` | the `key` token is shown **once** |
+| `revoke(keyId)` | `ApiKeyRevokeResponse` | |
+
+### `neon.regions` / `neon.user`
+
+| Method | Returns |
+| --- | --- |
+| `regions.list()` | `RegionResponse[]` |
+| `user.me()` | `CurrentUserInfoResponse` |
+| `user.organizations()` | `Organization[]` |
+
+---
+
+## Raw layer (every endpoint, 1:1)
+
+Anything not wrapped above is available raw. Pass `neon.client` to reuse the client's auth:
 
 ```ts
 import { raw } from "@neon/sdk";
 // or, for guaranteed tree-shaking: import { getProjectBranchSchema } from "@neon/sdk/raw";
 
 const { data } = await raw.getProjectBranchSchema({
-	client: neon.client,
-	path: { project_id, branch_id: "br-…" },
+  client: neon.client,
+  path: { project_id, branch_id },
 });
 ```
 
-## What's exported
-
-- **`createNeonClient`** — the ergonomic client factory.
-- **`raw`** — namespace of every generated endpoint function + client primitives (also at `@neon/sdk/raw`).
-- **Error classes** — `NeonError`, `NeonApiError`, `NeonNotFoundError`, `NeonAuthError`, `NeonRateLimitError`, `NeonOperationError`, `NeonTimeoutError`, `NeonNetworkError`.
-- **Types** — every request/response/error shape, re-exported flat for `import type { … }`.
+`neon.client` is the underlying configured Fetch client; `raw.*` are the generated functions, and all request/response/error **types** are re-exported flat from `@neon/sdk` for `import type { Project, Branch, … }`.
 
 ## Regenerating the client
 
@@ -107,6 +275,8 @@ pnpm --filter @neon/sdk spec:pull   # refresh the vendored spec from neon.com
 pnpm --filter @neon/sdk generate     # regenerate src/client
 pnpm --filter @neon/sdk build        # typecheck + bundle
 ```
+
+A coverage test (`src/neon/coverage.test.ts`) fails CI whenever the generated operation set changes, so every new endpoint is consciously wrapped or left raw-only.
 
 ## License
 
