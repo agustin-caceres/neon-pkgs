@@ -124,6 +124,22 @@ Legend: **[P]** returns `Paginated<T>` · **[W]** workflow (multi-step) · **→
 | `transfer({ fromOrgId?, toOrgId, projectIds })` | **→void** | `fromOrgId` defaults to client `orgId` |
 | `transferFromUser({ toOrgId, projectIds })` | **→void** | personal account → org |
 
+```ts
+// Provision a project and get a pooled connection string in one call
+const { data } = await neon.projects.createAndConnect(
+  { name: "tenant-42", region_id: "aws-us-east-1" },
+  { pooled: true },
+);
+// data: { project, connectionString }
+
+// Upgrade path: move projects from the sponsored org to the paid org
+await neon.projects.transfer({
+  fromOrgId: sponsoredOrgId,   // defaults to the client's `orgId`
+  toOrgId: paidOrgId,
+  projectIds: ["late-frost-12345"],
+});
+```
+
 ### `neon.branches`
 
 | Method | Returns | Notes |
@@ -137,6 +153,19 @@ Legend: **[P]** returns `Paginated<T>` · **[W]** workflow (multi-step) · **→
 | `getDefault(projectId)` | `Branch` | resolves the default branch by the `default` flag |
 | `setDefault(projectId, branchId)` | `Branch` | |
 | `finalizeRestore(projectId, branchId, { name? }?)` | **→void** | commits a restore previewed with `snapshots.restore({ finalize: false })` |
+
+```ts
+// Resolve the project's default ("production") branch
+const { data: prod } = await neon.branches.getDefault(projectId);
+
+// Branch off it with its own compute — returns a ready connection string
+const { data } = await neon.branches.createWithCompute(projectId, {
+  name: "preview/pr-123",
+  parentId: prod?.id,
+  compute: { minCu: 0.25, maxCu: 2 },
+});
+// data: { branch, endpoint, connectionString }
+```
 
 ### `neon.postgres`
 
@@ -171,6 +200,13 @@ const { data: uri } = await neon.postgres.connectionString({
 | `password(projectId, branchId, name)` | `string` (reveals the password) |
 | `resetPassword(projectId, branchId, name)` | `Role` (carries the new password) |
 
+```ts
+// Reveal a role's password, or rotate it
+const { data: password } = await neon.postgres.roles.password(projectId, branchId, "neondb_owner");
+const { data: role } = await neon.postgres.roles.resetPassword(projectId, branchId, "neondb_owner");
+// role.password holds the new secret
+```
+
 #### `neon.postgres.databases`
 
 | Method | Returns |
@@ -202,6 +238,15 @@ const { data: uri } = await neon.postgres.connectionString({
 | `getSchedule(projectId, branchId)` | `BackupSchedule` | |
 | `setSchedule(projectId, branchId, schedule)` | **→void** | |
 
+```ts
+// Snapshot a branch at a point in time (or an `lsn`), with a name + TTL
+const { data: snapshot } = await neon.snapshots.create(projectId, branchId, {
+  name: "pre-migration",
+  timestamp: "2026-06-01T00:00:00Z",
+  expiresAt: "2026-07-01T00:00:00Z",
+});
+```
+
 `restore` input: `{ name?, targetBranchId?, finalize?, preview?, keepOnAbort? }`.
 - Restoring **as a new branch** (no `targetBranchId`) finalizes by default → ready to use.
 - Restoring **onto an existing branch** doesn't finalize by default, so you can preview first.
@@ -222,6 +267,16 @@ await neon.snapshots.restore(projectId, snapshotId, {
 | `get(projectId, operationId)` | `Operation` | |
 | `waitFor(operations, options?)` | **→void** | `options`: `{ pollIntervalMs?, timeoutMs?, signal? }` — the readiness primitive |
 
+```ts
+// Wait on operations from a raw call (or when waitForReadiness is off)
+const { data } = await raw.createProjectBranch({
+  client: neon.client,
+  path: { project_id: projectId },
+  body: { branch: { name: "wip" } },
+});
+const { error } = await neon.operations.waitFor(data!.operations, { timeoutMs: 120_000 });
+```
+
 ### `neon.consumption`
 
 Cursor-paginated billing metrics. Each takes `{ from, to, granularity, project_ids?, org_id? }` (`perBranchV2` requires `project_ids`).
@@ -231,6 +286,17 @@ Cursor-paginated billing metrics. Each takes `{ from, to, granularity, project_i
 | `perProject(query)` | **[P]** `ConsumptionHistoryPerProject` |
 | `perProjectV2(query)` | **[P]** `ConsumptionHistoryPerProjectV2` |
 | `perBranchV2(query)` | **[P]** `ConsumptionHistoryPerBranchV2` |
+
+```ts
+// Paginated consumption metrics — stream every project across the range
+for await (const project of neon.consumption.perProject({
+  from: "2026-06-01T00:00:00Z",
+  to: "2026-06-30T00:00:00Z",
+  granularity: "daily",
+})) {
+  console.log(project);
+}
+```
 
 ### `neon.apiKeys`
 
