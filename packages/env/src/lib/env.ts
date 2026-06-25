@@ -78,10 +78,9 @@ export const NEON_ENV_VAR_KEYS = {
 	/**
 	 * AI Gateway (Preview). Mapped onto the OpenAI SDK's standard env vars so the OpenAI
 	 * clients work from env alone; `baseUrl` carries the gateway's OpenAI-dialect route prefix
-	 * (`/ai-gateway/openai/v1`). The `NEON_AI_GATEWAY_*` aliases are also emitted: `neonToken`
-	 * mirrors the OpenAI key, and `neonBaseUrl` is the bare branch gateway host
-	 * (`scheme://host`, no path) — the `@ai-sdk/neon` provider appends the
-	 * `/ai-gateway/<dialect>/…` routes itself (https://github.com/vercel/ai/pull/15997).
+	 * (`/v1/chat/completions`). The `NEON_AI_GATEWAY_*` aliases are also emitted:
+	 * `neonToken` mirrors the OpenAI key, and `neonBaseUrl` is the bare branch gateway host
+	 * (`scheme://host`, no path).
 	 */
 	aiGateway: {
 		apiKey: "OPENAI_API_KEY",
@@ -91,8 +90,8 @@ export const NEON_ENV_VAR_KEYS = {
 	},
 } as const;
 
-/** OpenAI-dialect route prefix on the branch AI Gateway host. */
-const AI_GATEWAY_OPENAI_PATH = "/ai-gateway/openai/v1";
+/** OpenAI-compatible chat-completions route on the branch AI Gateway host. */
+const AI_GATEWAY_OPENAI_PATH = "/v1/chat/completions";
 
 /**
  * Branch identity for the resolved branch. Always present on a `fetchEnv` result (the branch
@@ -163,7 +162,7 @@ export interface NeonStorageEnv {
  * AI Gateway access for the branch (Preview). Present on `NeonEnv` only when the policy
  * enables `preview.aiGateway`. `apiKey` is the minted credential's bearer (`api_token`);
  * `baseUrl` is the gateway's OpenAI-dialect endpoint on the branch-scoped gateway host
- * (`https://<branchId>-api.ai.<region>.…/ai-gateway/openai/v1`). Projects to the OpenAI SDK's
+ * (`https://<branchId>-api.ai.<region>.…/v1/chat/completions`). Projects to the OpenAI SDK's
  * standard env (`OPENAI_API_KEY`, `OPENAI_BASE_URL`), plus the `NEON_AI_GATEWAY_*` aliases.
  */
 export interface NeonAiGatewayEnv {
@@ -1302,8 +1301,7 @@ export function toEntries(env: NeonEnv<Config>): Record<string, string> {
 		out[keys.apiKey] = ai.apiKey;
 		out[keys.baseUrl] = ai.baseUrl;
 		// Neon-branded aliases: the same bearer, plus the bare branch gateway host
-		// (scheme://host, no path) — the @ai-sdk/neon provider appends the
-		// /ai-gateway/<dialect>/… routes itself (https://github.com/vercel/ai/pull/15997).
+		// (scheme://host, no path) for Neon-native clients.
 		out[keys.neonToken] = ai.apiKey;
 		out[keys.neonBaseUrl] = new URL(ai.baseUrl).origin;
 	}

@@ -256,6 +256,23 @@ describe('env pull', () => {
     );
   });
 
+  it('writes the AI Gateway OpenAI URL and Neon base URL when enabled', async () => {
+    writeFileSync(
+      join(cwd, 'neon.ts'),
+      'export default { preview: { aiGateway: true } };\n',
+    );
+
+    await pull(baseProps(new FakeNeonApi(), cwd));
+
+    const content = readFileSync(join(cwd, '.env.local'), 'utf8');
+    expect(content).toMatch(
+      /^OPENAI_BASE_URL=https:\/\/br-snowy-frost-12345-api\.ai\.fake\.neon\.tech\/v1\/chat\/completions$/m,
+    );
+    expect(content).toMatch(
+      /^NEON_AI_GATEWAY_BASE_URL=https:\/\/br-snowy-frost-12345-api\.ai\.fake\.neon\.tech$/m,
+    );
+  });
+
   it('updates an existing .env in place, preserving other keys', async () => {
     writeFileSync(
       join(cwd, '.env'),

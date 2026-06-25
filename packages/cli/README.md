@@ -349,7 +349,26 @@ After pinning the branch, `checkout` also runs [`env pull`](#env-pull) by defaul
 
 ### env pull
 
-`env pull` writes the linked branch's Neon environment variables into a local dotenv file: an existing `.env` if you have one, otherwise `.env.local` (override with `--file <path>`). Only Neon-managed keys (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, and the Neon Auth / Data API URLs when those services are enabled) are written; any other lines in the file are preserved. The branch comes from the closest `.neon` file, so no `--branch` is needed (pass `--branch <id|name>` to target another branch).
+`env pull` writes the linked branch's Neon environment variables into a local dotenv file: an existing `.env` if you have one, otherwise `.env.local` (override with `--file <path>`). Only values resolved by Neon are written; any other lines in the file are preserved. The branch comes from the closest `.neon` file, so no `--branch` is needed (pass `--branch <id|name>` to target another branch).
+
+The output can include these keys, depending on which services are enabled on the branch:
+
+| Key | Value |
+| --- | --- |
+| `DATABASE_URL` | `postgresql://<role>:<pw>@<endpoint-id>-pooler.<cell>.<region>.<cloud>.neon.tech/<db>?channel_binding=require&sslmode=require` |
+| `DATABASE_URL_UNPOOLED` | `postgresql://<role>:<pw>@<endpoint-id>.<cell>.<region>.<cloud>.neon.tech/<db>?channel_binding=require&sslmode=require` |
+| `NEON_BRANCH` | `<branch-slug>` (for example, `main`) |
+| `NEON_AUTH_BASE_URL` | `https://<endpoint-id>.neonauth.<cell>.<region>.<cloud>.neon.tech/<db>/auth` |
+| `NEON_AUTH_JWKS_URL` | `https://<endpoint-id>.neonauth.<cell>.<region>.<cloud>.neon.tech/<db>/auth/.well-known/jwks.json` |
+| `NEON_DATA_API_URL` | `https://<endpoint-id>.apirest.<cell>.<region>.<cloud>.neon.tech/<db>/rest/v1` |
+| `AWS_ENDPOINT_URL_S3` | `https://<branch-id>.storage.<cell>.<region>.<cloud>.neon.tech` |
+| `AWS_ACCESS_KEY_ID` | `nak_live_<32hex>` |
+| `AWS_SECRET_ACCESS_KEY` | `nsk_live_<64hex>` |
+| `AWS_REGION` | Region, for example `us-east-2` |
+| `OPENAI_BASE_URL` | `https://<branch-id>-api.ai.<cell>.<region>.<cloud>.neon.tech/v1/chat/completions` |
+| `NEON_AI_GATEWAY_BASE_URL` | `https://<branch-id>-api.ai.<cell>.<region>.<cloud>.neon.tech` |
+
+When the AI Gateway is enabled, `OPENAI_API_KEY` and `NEON_AI_GATEWAY_TOKEN` are also emitted from the minted branch credential.
 
 `link` and `checkout` invoke `env pull` automatically (see above), so you usually only run it by hand to refresh vars or to pull a different branch into a specific file:
 

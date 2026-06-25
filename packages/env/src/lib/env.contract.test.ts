@@ -178,7 +178,7 @@ describe("toEntries → parseEnv round-trip (cross-process transport)", () => {
 			},
 			aiGateway: {
 				apiKey: "nt_live_abc_def",
-				baseUrl: "https://x.neon.build/ai-gateway/openai/v1",
+				baseUrl: "https://x.neon.build/v1/chat/completions",
 			},
 		};
 

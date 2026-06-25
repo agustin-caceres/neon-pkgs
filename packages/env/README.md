@@ -80,14 +80,22 @@ Flags (both commands): `--config <path>`, `--project-id`, `--branch`, `--api-key
 
 ## Env vars produced
 
-| Key | From |
+| Key | Value |
 | --- | --- |
-| `NEON_BRANCH` | the resolved branch **name** — mirrors what the Neon Functions runtime injects on every branch, so local dev matches the deployed runtime |
-| `DATABASE_URL` | pooled connection string |
-| `DATABASE_URL_UNPOOLED` | direct connection string |
-| `NEON_AUTH_BASE_URL` | Neon Auth integration (when `auth` is enabled) |
-| `NEON_AUTH_JWKS_URL` | Neon Auth JWKS endpoint for verifying issued tokens (when `auth` is enabled) |
-| `NEON_DATA_API_URL` | Data API integration (when `dataApi` is enabled) |
+| `DATABASE_URL` | `postgresql://<role>:<pw>@<endpoint-id>-pooler.<cell>.<region>.<cloud>.neon.tech/<db>?channel_binding=require&sslmode=require` |
+| `DATABASE_URL_UNPOOLED` | `postgresql://<role>:<pw>@<endpoint-id>.<cell>.<region>.<cloud>.neon.tech/<db>?channel_binding=require&sslmode=require` |
+| `NEON_BRANCH` | `<branch-slug>` (for example, `main`) |
+| `NEON_AUTH_BASE_URL` | `https://<endpoint-id>.neonauth.<cell>.<region>.<cloud>.neon.tech/<db>/auth` |
+| `NEON_AUTH_JWKS_URL` | `https://<endpoint-id>.neonauth.<cell>.<region>.<cloud>.neon.tech/<db>/auth/.well-known/jwks.json` |
+| `NEON_DATA_API_URL` | `https://<endpoint-id>.apirest.<cell>.<region>.<cloud>.neon.tech/<db>/rest/v1` |
+| `AWS_ENDPOINT_URL_S3` | `https://<branch-id>.storage.<cell>.<region>.<cloud>.neon.tech` |
+| `AWS_ACCESS_KEY_ID` | `nak_live_<32hex>` |
+| `AWS_SECRET_ACCESS_KEY` | `nsk_live_<64hex>` |
+| `AWS_REGION` | Region, for example `us-east-2` |
+| `OPENAI_BASE_URL` | `https://<branch-id>-api.ai.<cell>.<region>.<cloud>.neon.tech/v1/chat/completions` |
+| `NEON_AI_GATEWAY_BASE_URL` | `https://<branch-id>-api.ai.<cell>.<region>.<cloud>.neon.tech` |
+
+When the AI Gateway is enabled, `OPENAI_API_KEY` and `NEON_AI_GATEWAY_TOKEN` are also emitted from the minted branch credential.
 
 ## Resolution
 
