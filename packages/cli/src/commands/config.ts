@@ -144,12 +144,16 @@ export const envPullFlag = {
 // ── `config init` ─────────────────────────────────────────────────────────────
 
 /**
- * The published npm packages a `neon.ts` project needs. The library sources live
- * under the `@neon/*` org now, but those aren't on npm yet — consumers install the
- * still-published `@neondatabase/*` names. Flip these to `@neon/*` once published.
+ * The published npm packages a `neon.ts` project needs — the `@neon/*` org names.
+ *
+ * ⚠️ These ship to users the next time `neonctl` is released, so do NOT release
+ * neonctl until `@neon/config` and `@neon/env` are published to npm — otherwise
+ * `config init` would install packages that don't exist yet. (The libraries are
+ * mid-migration from `@neondatabase/*`; track their publish before cutting a CLI
+ * release.)
  */
-const CONFIG_PACKAGE = "@neondatabase/config";
-const ENV_PACKAGE = "@neondatabase/env";
+const CONFIG_PACKAGE = "@neon/config";
+const ENV_PACKAGE = "@neon/env";
 const REQUIRED_PACKAGES = [CONFIG_PACKAGE, ENV_PACKAGE] as const;
 
 /** package.json fields a dependency can be declared in. */
@@ -359,7 +363,7 @@ export const builder = (argv: yargs.Argv) =>
 				yargs.options({
 					install: {
 						describe:
-							"Install @neondatabase/config and @neondatabase/env if they're missing. " +
+							"Install @neon/config and @neon/env if they're missing. " +
 							"On by default; use --no-install to just print the command.",
 						type: "boolean",
 						default: true,
