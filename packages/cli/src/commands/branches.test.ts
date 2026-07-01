@@ -18,6 +18,24 @@ describe("branches", () => {
 		});
 	});
 
+	test("list with include-deleted shows deleted state and recovery", async ({
+		testCliCommand,
+	}) => {
+		await testCliCommand(
+			["branches", "list", "--project-id", "test", "--include-deleted"],
+			{ mockDir: "deleted_branches", outputTable: true },
+		);
+	});
+
+	test("list without include-deleted omits deleted branches", async ({
+		testCliCommand,
+	}) => {
+		await testCliCommand(["branches", "list", "--project-id", "test"], {
+			mockDir: "deleted_branches",
+			outputTable: true,
+		});
+	});
+
 	test("list/table marks the branch pinned in .neon as [current]", async ({
 		testCliCommand,
 	}) => {

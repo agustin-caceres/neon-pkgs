@@ -29,6 +29,7 @@ export const BRANCH_FIELDS: readonly (keyof Branch)[] = [
 	"current_state",
 	"created_at",
 	"expires_at",
+	"recovery",
 ];
 
 const BRANCH_FIELDS_RESET: readonly (keyof Branch)[] = [
@@ -60,7 +61,15 @@ export const builder = (argv: yargs.Argv) =>
 		.command(
 			"list",
 			"List branches",
-			(yargs) => yargs,
+			(yargs) =>
+				yargs.options({
+					"include-deleted": {
+						describe:
+							"Include deleted branches that are still recoverable",
+						type: "boolean",
+						default: false,
+					},
+				}),
 			(args) => list(args as any),
 		)
 		.command(
@@ -319,11 +328,12 @@ export const handler = (args: yargs.Argv) => {
 	return args;
 };
 
-const list = async (props: ProjectScopeProps) => {
+const list = async (props: ProjectScopeProps & { includeDeleted: boolean }) => {
 	const {
 		data: { branches, annotations },
 	} = await props.apiClient.listProjectBranches({
 		projectId: props.projectId,
+		include_deleted: props.includeDeleted,
 	});
 	// The branch pinned in the local context (.neon), so we can flag it as `[current]` — the
 	// one commands target by default and that `neonctl env pull` would read. The context
@@ -333,6 +343,9 @@ const list = async (props: ProjectScopeProps) => {
 		fields: BRANCH_FIELDS,
 		renderColumns: {
 			expires_at: (br) => br.expires_at || "never",
+			current_state: (br) =>
+				br.recovery ? "deleted" : (br.current_state ?? ""),
+			recovery: (br) => br.recovery?.recoverable_until ?? "",
 			// Word labels (not symbols) so they read clearly and match the existing `[anon]`.
 			name: (br) => {
 				const annotation = annotations[br.id];
