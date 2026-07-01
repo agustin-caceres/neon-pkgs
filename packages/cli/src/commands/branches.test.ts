@@ -275,6 +275,41 @@ describe("branches", () => {
 		]);
 	});
 
+	/* recover */
+
+	test("recover by id", async ({ testCliCommand }) => {
+		await testCliCommand([
+			"branches",
+			"recover",
+			"br-sunny-branch-123456",
+			"--project-id",
+			"test",
+		]);
+	});
+
+	test("recover by id/table output", async ({ testCliCommand }) => {
+		await testCliCommand(
+			[
+				"branches",
+				"recover",
+				"br-sunny-branch-123456",
+				"--project-id",
+				"test",
+			],
+			{ outputTable: true },
+		);
+	});
+
+	test("recover by name", async ({ testCliCommand }) => {
+		await testCliCommand([
+			"branches",
+			"recover",
+			"test_branch",
+			"--project-id",
+			"test",
+		]);
+	});
+
 	/* rename */
 
 	test("rename", async ({ testCliCommand }) => {

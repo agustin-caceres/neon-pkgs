@@ -247,6 +247,12 @@ export const builder = (argv: yargs.Argv) =>
 			(args) => deleteBranch(args as any),
 		)
 		.command(
+			"recover <id|name>",
+			"Recover a deleted branch within its recovery window",
+			(yargs) => yargs,
+			(args) => recover(args as any),
+		)
+		.command(
 			"get <id|name>",
 			"Get a branch",
 			(yargs) => yargs,
@@ -523,6 +529,32 @@ const deleteBranch = async (props: ProjectScopeProps & IdOrNameProps) => {
 			fields: BRANCH_FIELDS,
 		});
 	}
+};
+
+const recover = async (props: ProjectScopeProps & IdOrNameProps) => {
+	const branchId = await branchIdResolve({
+		branch: props.id,
+		apiClient: props.apiClient,
+		projectId: props.projectId,
+		includeDeleted: true,
+	});
+	const { data } = await retryOnLock(() =>
+		props.apiClient.recoverProjectBranch(props.projectId, branchId),
+	);
+	const out = writer(props);
+	out.write(data.branch, {
+		fields: BRANCH_FIELDS,
+		title: "branch",
+		emptyMessage: "No branches have been found.",
+	});
+	if (data.endpoints?.length) {
+		out.write(data.endpoints, {
+			fields: ["id", "created_at"],
+			title: "endpoints",
+			emptyMessage: "No endpoints have been found.",
+		});
+	}
+	out.end();
 };
 
 const get = async (props: ProjectScopeProps & IdOrNameProps) => {
