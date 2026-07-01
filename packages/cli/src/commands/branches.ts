@@ -243,7 +243,15 @@ export const builder = (argv: yargs.Argv) =>
 		.command(
 			"delete <id|name>",
 			"Delete a branch",
-			(yargs) => yargs,
+			(yargs) =>
+				yargs.options({
+					"hard-delete": {
+						describe:
+							"Permanently delete the branch immediately, skipping the 7-day recovery window",
+						type: "boolean",
+						default: false,
+					},
+				}),
 			(args) => deleteBranch(args as any),
 		)
 		.command(
@@ -518,10 +526,16 @@ const setDefault = async (props: ProjectScopeProps & IdOrNameProps) => {
 	});
 };
 
-const deleteBranch = async (props: ProjectScopeProps & IdOrNameProps) => {
+const deleteBranch = async (
+	props: ProjectScopeProps & IdOrNameProps & { hardDelete: boolean },
+) => {
 	const branchId = await branchIdFromProps(props);
 	const { data } = await retryOnLock(() =>
-		props.apiClient.deleteProjectBranch(props.projectId, branchId),
+		props.apiClient.deleteProjectBranch(
+			props.projectId,
+			branchId,
+			props.hardDelete,
+		),
 	);
 	// A 204 (branch already gone) carries no body; only a 200 returns it.
 	if (data) {

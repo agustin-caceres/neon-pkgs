@@ -189,6 +189,13 @@ created_at: 2021-01-01T00:00:00.000Z
 "
 `;
 
+exports[`branches > delete by id with hard-delete 1`] = `
+"id: br-harddel-branch-123456
+name: harddel-branch
+created_at: 2021-01-01T00:00:00.000Z
+"
+`;
+
 exports[`branches > get by id 1`] = `
 "name: test_branch
 id: br-sunny-branch-123456

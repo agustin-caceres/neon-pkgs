@@ -275,6 +275,17 @@ describe("branches", () => {
 		]);
 	});
 
+	test("delete by id with hard-delete", async ({ testCliCommand }) => {
+		await testCliCommand([
+			"branches",
+			"delete",
+			"br-harddel-branch-123456",
+			"--project-id",
+			"test",
+			"--hard-delete",
+		]);
+	});
+
 	/* recover */
 
 	test("recover by id", async ({ testCliCommand }) => {
