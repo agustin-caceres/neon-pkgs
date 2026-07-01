@@ -330,13 +330,10 @@ describe("branches", () => {
 	});
 
 	test("recover by name", async ({ testCliCommand }) => {
-		await testCliCommand([
-			"branches",
-			"recover",
-			"test_branch",
-			"--project-id",
-			"test",
-		]);
+		await testCliCommand(
+			["branches", "recover", "gone-branch", "--project-id", "test"],
+			{ mockDir: "deleted_branches" },
+		);
 	});
 
 	/* rename */
