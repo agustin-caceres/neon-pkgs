@@ -341,6 +341,9 @@ const list = async (props: ProjectScopeProps & { includeDeleted: boolean }) => {
 	const currentBranch = contextBranch(readContextFile(props.contextFile));
 	writer(props).end(branches, {
 		fields: BRANCH_FIELDS,
+		renderHeaders: {
+			recovery: "Recoverable Until",
+		},
 		renderColumns: {
 			expires_at: (br) => br.expires_at || "never",
 			current_state: (br) =>
