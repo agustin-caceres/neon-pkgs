@@ -41,11 +41,8 @@ type SuccessArm<R> = R extends { error: undefined | null } ? R : never;
  * The success payload of a generated raw function — derived from its default (non-throw,
  * fields) return type, so it stays correct as the client is regenerated.
  */
-export type RawData<F extends AnyRawFn> = SuccessArm<
-	Awaited<ReturnType<F>>
-> extends { data: infer D }
-	? D
-	: never;
+export type RawData<F extends AnyRawFn> =
+	SuccessArm<Awaited<ReturnType<F>>> extends { data: infer D } ? D : never;
 
 /** The call options for a wrapped raw function, minus the removed hey-api switches. */
 export type RawOptions<F extends AnyRawFn> = Omit<
