@@ -29,7 +29,7 @@ export type InspectQuery = {
 export const INSPECT_QUERIES = {
 	"cache-hit": {
 		describe:
-			"Buffer-cache hit rates for indexes and tables (pg_statio_user_*)",
+			"shared_buffers hit rate for indexes and tables (pg_statio_user_*). On Neon, see lfc-hit-rate for the effective cache.",
 		fields: ["name", "ratio"],
 		sql: /* sql */ `
 			SELECT
@@ -43,6 +43,50 @@ export const INSPECT_QUERIES = {
 				sum(heap_blks_hit)::float
 					/ nullif(sum(heap_blks_hit + heap_blks_read), 0) AS ratio
 			FROM pg_statio_user_tables;
+		`,
+	},
+	"lfc-hit-rate": {
+		describe:
+			"Local File Cache hit rate — the effective cache on Neon (needs neon extension)",
+		fields: ["name", "ratio"],
+		emptyMessage: "No LFC stats available.",
+		requiresExtension: "neon",
+		sql: /* sql */ `
+			SELECT
+				'lfc hit rate' AS name,
+				(SELECT lfc_value FROM neon_lfc_stats WHERE lfc_key = 'file_cache_hits')::float
+					/ nullif(
+						(SELECT lfc_value FROM neon_lfc_stats WHERE lfc_key = 'file_cache_hits')
+						+ (SELECT lfc_value FROM neon_lfc_stats WHERE lfc_key = 'file_cache_misses'),
+						0
+					) AS ratio;
+		`,
+	},
+	"working-set": {
+		describe:
+			"Estimated working set size vs LFC size across time windows; if it exceeds LFC, scale compute up (needs neon extension)",
+		fields: ["window", "working_set", "lfc_size", "exceeds_lfc"],
+		emptyMessage: "No working-set estimate available.",
+		requiresExtension: "neon",
+		sql: /* sql */ `
+			SELECT
+				w.window,
+				pg_size_pretty(w.working_set_bytes) AS working_set,
+				pg_size_pretty(pg_size_bytes(current_setting('neon.file_cache_size_limit'))) AS lfc_size,
+				CASE
+					WHEN w.working_set_bytes
+						> pg_size_bytes(current_setting('neon.file_cache_size_limit'))
+					THEN 'yes' ELSE 'no'
+				END AS exceeds_lfc
+			FROM (
+				SELECT
+					x AS window,
+					approximate_working_set_size_seconds(
+						extract('epoch' from x::interval)::int
+					)::bigint * 8192 AS working_set_bytes
+				FROM (VALUES ('1m'), ('5m'), ('15m'), ('1h')) AS t(x)
+			) w
+			ORDER BY working_set_bytes;
 		`,
 	},
 	"table-sizes": {
