@@ -1,6 +1,6 @@
 import type { Branch } from "@neon/sdk";
 import type yargs from "yargs";
-import { retryOnLock } from "../api.js";
+import { isNeonApiError, retryOnLock } from "../api.js";
 
 import { contextBranch, readContextFile } from "../context.js";
 import { log } from "../log.js";
@@ -407,39 +407,69 @@ const create = async (
 		}
 	}
 
-	const { data } = await retryOnLock(() =>
-		props.apiClient.createProjectBranch(props.projectId, {
-			branch: {
-				name: props.name,
-				...parentProps,
-				...(props.schemaOnly ? { init_source: "schema-only" } : {}),
-				...(props["expires-at"]
-					? {
-							expires_at: new Date(
-								props["expires-at"],
-							).toISOString(),
-						}
-					: {}),
-			},
-			endpoints: props.compute
-				? [
-						{
-							type: props.type,
-							suspend_timeout_seconds:
-								props.suspendTimeout === 0
-									? undefined
-									: props.suspendTimeout,
-							...(props.cu
-								? getComputeUnits(props.cu)
-								: undefined),
-						},
-					]
-				: [],
-			annotation_value: props.annotation
-				? JSON.parse(props.annotation)
-				: undefined,
-		}),
-	);
+	let data: Awaited<
+		ReturnType<typeof props.apiClient.createProjectBranch>
+	>["data"];
+	try {
+		({ data } = await retryOnLock(() =>
+			props.apiClient.createProjectBranch(props.projectId, {
+				branch: {
+					name: props.name,
+					...parentProps,
+					...(props.schemaOnly ? { init_source: "schema-only" } : {}),
+					...(props["expires-at"]
+						? {
+								expires_at: new Date(
+									props["expires-at"],
+								).toISOString(),
+							}
+						: {}),
+				},
+				endpoints: props.compute
+					? [
+							{
+								type: props.type,
+								suspend_timeout_seconds:
+									props.suspendTimeout === 0
+										? undefined
+										: props.suspendTimeout,
+								...(props.cu
+									? getComputeUnits(props.cu)
+									: undefined),
+							},
+						]
+					: [],
+				annotation_value: props.annotation
+					? JSON.parse(props.annotation)
+					: undefined,
+			}),
+		));
+	} catch (err) {
+		if (!isNeonApiError(err) || err.status !== 409) {
+			throw err;
+		}
+
+		const { data: latest } = await props.apiClient.listProjectBranches({
+			projectId: props.projectId,
+		});
+		const existing = latest.branches.find(
+			(branch: Branch) => branch.name === props.name,
+		);
+		if (!existing) {
+			throw err;
+		}
+		if (props.psql) {
+			throw new Error(
+				`Branch "${props.name}" already exists. Use \`neon branches get ${props.name}\` or rerun without --psql.`,
+			);
+		}
+
+		log.info('Branch "%s" already exists; using it.', props.name);
+		writer(props).end(existing, {
+			fields: BRANCH_FIELDS,
+		});
+		return;
+	}
 
 	const parent = branches.find((b: Branch) => b.id === data.branch.parent_id);
 	if (parent?.protected) {
