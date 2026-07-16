@@ -23,16 +23,37 @@ const hasCurrentBranchArgv = (): boolean =>
 let client: Analytics | undefined;
 let clientInitialized = false;
 let userId = "";
+let errorEventContext: ErrorEventContext | undefined;
+
+type AnalyticsEventArgs = {
+	_: (string | number)[];
+	output?: string;
+	currentBranch?: boolean;
+};
+
+type AnalyticsEventProperties = {
+	version: string;
+	command: string;
+	flags: {
+		output: string | undefined;
+	};
+	ci: boolean;
+	githubEnvVars: ReturnType<typeof getGithubEnvVars>;
+};
+
+type ErrorEventContext = {
+	version: string;
+	ci: boolean;
+};
 
 /**
  * Phase 1: Run before validation so the Segment client exists if any
  * middleware (e.g. auth) fails. Enables sendError() in the fail handler.
  * Does not resolve user id or send CLI Started.
  */
-export const initAnalyticsClientMiddleware = (args: {
-	analytics: boolean;
-	[key: string]: unknown;
-}) => {
+export const initAnalyticsClientMiddleware = (
+	args: AnalyticsEventArgs & { analytics: boolean },
+) => {
 	if (!args.analytics || clientInitialized) {
 		return;
 	}
@@ -40,10 +61,11 @@ export const initAnalyticsClientMiddleware = (args: {
 	// middleware runs before validation, so guard on the raw argv too (in case
 	// the parsed `currentBranch` flag isn't populated this early): never create
 	// the Segment client, which keeps trackEvent/closeAnalytics no-ops downstream.
-	if (isCurrentBranchProbe(args as any) || hasCurrentBranchArgv()) {
+	if (isCurrentBranchProbe(args) || hasCurrentBranchArgv()) {
 		return;
 	}
 	clientInitialized = true;
+	errorEventContext = getErrorAnalyticsEventContext(args);
 	client = new Analytics({
 		writeKey: WRITE_KEY,
 		host: "https://track.neon.tech",
@@ -135,6 +157,24 @@ export const closeAnalytics = async (opts?: { timeout?: number }) => {
 	}
 };
 
+export const getErrorAnalyticsEventProperties = (
+	err: Error,
+	errCode: ErrorCode,
+	context?: ErrorEventContext,
+) => {
+	const apiError = isNeonApiError(err) ? err : undefined;
+	const requestId = apiError?.headers?.["x-neon-ret-request-id"];
+
+	return {
+		...context,
+		message: err.message,
+		stack: err.stack,
+		errCode,
+		statusCode: apiError?.status,
+		requestId,
+	};
+};
+
 export const sendError = (err: Error, errCode: ErrorCode) => {
 	if (!client) {
 		return;
@@ -147,13 +187,11 @@ export const sendError = (err: Error, errCode: ErrorCode) => {
 	client.track({
 		event: "CLI Error",
 		userId: userId || "anonymous",
-		properties: {
-			message: err.message,
-			stack: err.stack,
+		properties: getErrorAnalyticsEventProperties(
+			err,
 			errCode,
-			statusCode: apiError?.status,
-			requestId: requestId,
-		},
+			errorEventContext,
+		),
 	});
 	log.debug("Sent CLI error event: %s", errCode);
 };
@@ -173,7 +211,16 @@ export const trackEvent = (
 	log.debug("Sent CLI event: %s", event);
 };
 
-export const getAnalyticsEventProperties = (args: any) => ({
+const getErrorAnalyticsEventContext = (
+	_args: AnalyticsEventArgs,
+): ErrorEventContext => ({
+	version: pkg.version,
+	ci: isCi(),
+});
+
+export const getAnalyticsEventProperties = (
+	args: AnalyticsEventArgs,
+): AnalyticsEventProperties => ({
 	version: pkg.version,
 	command: args._.join(" "),
 	flags: {
