@@ -166,6 +166,56 @@ gh workflow run neon-pkgs.yml --repo databricks/secure-public-registry-releases-
 > `@neon/functions`, then `@neon/ai-sdk-provider`). Valid `package` values are the
 > choices in the workflow's `workflow_dispatch` input (each maintained package, plus `dry-run`).
 
+**Publish order: leaf deps first, the CLI last.** The build packs from source (internal `@neon/*`
+deps are `workspace:*`), so ordering doesn't affect whether a run *succeeds* — but for npm
+consumers to resolve cleanly, publish a dependency before its dependents:
+`@neon/config` → `@neon/config-runtime` / `@neon/env` → `neonctl` (which also ships `neon`, the
+standalone binaries, and the GitHub release). `neon-init` is special — see below.
+
+#### ⚠️ When the release bumps `neon-init` (the lockfile catch-22)
+
+`packages/cli` pins **`neon-init` to a published version** (not `workspace:*`). `changeset version`
+bumps `neon-init` and rewrites the CLI's pin, **but doesn't touch `pnpm-lock.yaml`** — so the merged
+release PR leaves `main`'s lockfile pointing at the old `neon-init` while `packages/cli/package.json`
+wants the new one. The publish workflow runs `pnpm install --frozen-lockfile` over the **whole**
+workspace before packing any package, so it fails with `ERR_PNPM_OUTDATED_LOCKFILE` for **every**
+dispatch. And you can't just `pnpm install` to fix the lockfile, because the new `neon-init` isn't on
+npm yet (pnpm 10's `link-workspace-packages=false` makes it try to *fetch*). Catch-22.
+
+**Break it in this order:**
+
+1. **Publish `neon-init` first from a throwaway ref with a consistent lockfile.** Branch off `main`,
+   revert *only* the CLI's `neon-init` pin back to the currently-published version (so `package.json`
+   matches the still-old lockfile), push, and dispatch with `ref=<that-branch>`:
+
+   ```bash
+   git checkout -b chore/tmp-publish-neon-init main
+   # edit packages/cli/package.json: "neon-init": "<new>" → "<current-published>"
+   git commit -am "chore: temp CLI neon-init pin to publish neon-init@<new> (do not merge)"
+   git push -u origin HEAD
+   gh workflow run neon-pkgs.yml --repo databricks/secure-public-registry-releases-eng \
+     -f package=neon-init -f ref=chore/tmp-publish-neon-init
+   # after npm view neon-init version shows <new>: delete the branch, never merge it
+   ```
+
+   This publishes **only** `neon-init`; the CLI is never published from this ref.
+2. **Sync the lockfile on `main`.** Now that the new `neon-init` resolves, regenerate and land a tiny
+   PR (its CI passes because the lockfile finally matches):
+
+   ```bash
+   git checkout main && git pull
+   pnpm install --lockfile-only          # updates only the neon-init entry
+   git checkout -b chore/sync-lockfile-neon-init-<new>
+   git commit -am "chore: sync lockfile for neon-init@<new>"
+   # open PR, wait for green CI, merge
+   ```
+
+3. **Publish the rest from `main`** leaf-first / CLI-last (see order above).
+
+If the release does **not** touch `neon-init`, skip all of this — the lockfile stays consistent and
+you publish straight from `main`. The permanent fix is to move the CLI's `neon-init` dep to
+`workspace:*` like every other internal package.
+
 After each run succeeds, confirm with `npm view <pkg> version` — if it still shows the old version,
 you ran a dry-run (missing/`dry-run` `package` input); re-dispatch with the real `-f package=<name>`.
 This requires access to that repo — if you don't have it, hand the publish backlog list to someone
@@ -177,6 +227,11 @@ who does.
   `-f package=<name>` (and `-f ref=main`), once per bumped package. A `dry-run` (or input-less)
   dispatch goes green and prints a "Publish …" step but lands nothing on npm — verify with
   `npm view <pkg> version`, not the green check.
+- **A release that bumps `neon-init` needs the ordering dance** (publish `neon-init` from a
+  throwaway consistent ref → sync lockfile PR → publish the rest). The CLI pins `neon-init` to a
+  published version, so `changeset version` leaves `main`'s lockfile stale and every publish's
+  `frozen-lockfile` install fails until it's fixed. See "When the release bumps `neon-init`" in
+  step 7.
 - **CHANGELOG version gaps** can happen when a prior PR bumped `package.json` directly without a
   changeset (e.g. `ai-sdk-provider` jumped 0.2.0 → 0.4.0 in the log, skipping 0.3.0). Surface it;
   don't try to backfill.
