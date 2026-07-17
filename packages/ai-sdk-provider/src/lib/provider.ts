@@ -29,6 +29,7 @@ import { z } from "zod/v4";
 import { NeonAnthropicLanguageModel } from "./neon-anthropic-language-model.js";
 import { NeonChatLanguageModel } from "./neon-chat-language-model.js";
 import type { NeonChatModelId } from "./neon-chat-options.js";
+import { wrapFetchWithHarmonyNormalization } from "./neon-harmony-normalize.js";
 import { getNeonModelRoute } from "./neon-model-capabilities.js";
 import { NeonResponsesLanguageModel } from "./neon-responses-language-model.js";
 import { VERSION } from "./version.js";
@@ -178,7 +179,12 @@ export function createNeon(options: NeonProviderSettings = {}): NeonProvider {
 			provider: "neon.chat",
 			url: ({ path }) => `${getHost()}/v1${path}`,
 			headers: getHeaders,
-			fetch: options.fetch,
+			// TODO(#308): Temporary workaround for gpt-oss. The gateway returns a
+			// non-compliant "harmony" content-array shape; this wrapper normalizes it
+			// to the Chat Completions contract and is a transparent pass-through for
+			// every compliant response. Remove it (and neon-harmony-normalize.ts) once
+			// the gateway returns spec-compliant gpt-oss responses.
+			fetch: wrapFetchWithHarmonyNormalization(options.fetch),
 			errorStructure: neonErrorStructure,
 			transformRequestBody: transformNeonRequestBody,
 			supportsStructuredOutputs: true,
