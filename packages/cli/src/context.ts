@@ -63,7 +63,44 @@ export const isConfigInit = (args: { _: (string | number)[] }): boolean =>
 const CONTEXT_FILE = ".neon";
 const GITIGNORE_FILE = ".gitignore";
 
-const wrapWithContextFile = (dir: string) => resolve(dir, CONTEXT_FILE);
+type ResolvePath = (...paths: string[]) => string;
+
+const canAccess = (file: string): boolean => {
+	try {
+		accessSync(file);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
+/**
+ * Walk toward the filesystem root looking for an accessible context file.
+ * Path resolution and access are injectable so platform-specific traversal
+ * semantics can be exercised on every CI host.
+ */
+export const walkContextFile = (
+	cwd: string,
+	root: string,
+	home: string,
+	resolvePath: ResolvePath,
+	canAccessFile: (file: string) => boolean,
+): string => {
+	let currentDir = cwd;
+	while (currentDir !== root && currentDir !== home) {
+		const contextFile = resolvePath(currentDir, CONTEXT_FILE);
+		if (canAccessFile(contextFile)) {
+			return contextFile;
+		}
+		const parentDir = resolvePath(currentDir, "..");
+		if (parentDir === currentDir) {
+			break;
+		}
+		currentDir = parentDir;
+	}
+
+	return resolvePath(cwd, CONTEXT_FILE);
+};
 
 /**
  * Resolve the default `.neon` path for the current working directory.
@@ -84,20 +121,7 @@ const wrapWithContextFile = (dir: string) => resolve(dir, CONTEXT_FILE);
  * `process.cwd()` (which would race with other tests running in parallel).
  */
 export const currentContextFile = (cwd: string = process.cwd()) => {
-	let currentDir = cwd;
-	const root = normalize("/");
-	const home = homedir();
-	while (currentDir !== root && currentDir !== home) {
-		try {
-			accessSync(resolve(currentDir, CONTEXT_FILE));
-			return wrapWithContextFile(currentDir);
-		} catch {
-			// ignore
-		}
-		currentDir = resolve(currentDir, "..");
-	}
-
-	return wrapWithContextFile(cwd);
+	return walkContextFile(cwd, normalize("/"), homedir(), resolve, canAccess);
 };
 
 export const readContextFile = (file: string): Context => {
