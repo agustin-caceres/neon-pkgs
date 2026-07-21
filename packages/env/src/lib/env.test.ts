@@ -76,6 +76,28 @@ function seededFakeWithRoles(roleNames: string[]) {
 	return { api, projectId };
 }
 
+function seededFakeWithDatabases(
+	databases: Array<{ name: string; ownerName?: string }>,
+) {
+	const api = new FakeNeonApi();
+	const projectId = "proj-env-dbs";
+	api.seedProject({
+		project: {
+			id: projectId,
+			name: "env-dbs-test",
+			regionId: "aws-us-east-1",
+			pgVersion: 17,
+		},
+		branches: [
+			{
+				branch: { id: "br-main", name: "main", isDefault: true },
+				databases,
+			},
+		],
+	});
+	return { api, projectId };
+}
+
 describe("fetchEnv", () => {
 	test("fetches postgres env for selected branch", async () => {
 		const { api, projectId } = seededFake();
@@ -245,6 +267,55 @@ describe("fetchEnv", () => {
 		expect(env.postgres.databaseUrl).toContain(
 			"postgresql://authenticator:",
 		);
+	});
+
+	test("prefers the default neondb among multiple databases", async () => {
+		const { api, projectId } = seededFakeWithDatabases([
+			{ name: "my-database" },
+			{ name: "neondb" },
+		]);
+		const env = await fetchEnv(defineConfig({}), {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
+		expect(env.postgres.databaseUrl).toContain("/neondb?");
+	});
+
+	test("uses the sole remaining database when neondb is absent", async () => {
+		const { api, projectId } = seededFakeWithDatabases([
+			{ name: "my-database" },
+		]);
+		const env = await fetchEnv(defineConfig({}), {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
+		expect(env.postgres.databaseUrl).toContain("/my-database?");
+	});
+
+	test("throws when several databases and none is neondb", async () => {
+		const { api, projectId } = seededFakeWithDatabases([
+			{ name: "alpha" },
+			{ name: "beta" },
+		]);
+		await expect(
+			fetchEnv(defineConfig({}), { api, projectId, branchId: "br-main" }),
+		).rejects.toMatchObject({ code: ErrorCode.AmbiguousBranchAuth });
+	});
+
+	test("an explicit databaseName still wins over the auto-pick", async () => {
+		const { api, projectId } = seededFakeWithDatabases([
+			{ name: "my-database" },
+			{ name: "neondb" },
+		]);
+		const env = await fetchEnv(defineConfig({}), {
+			api,
+			projectId,
+			branchId: "br-main",
+			databaseName: "my-database",
+		});
+		expect(env.postgres.databaseUrl).toContain("/my-database?");
 	});
 });
 

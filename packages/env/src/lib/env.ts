@@ -32,6 +32,13 @@ import { z } from "zod";
 const NEON_DEFAULT_OWNER_ROLE = "neondb_owner";
 
 /**
+ * Neon's default database, created with every project. When a branch has several databases
+ * and none was requested, this is preferred for the `DATABASE_URL` so the common case (a
+ * user added a second database next to `neondb`) auto-picks without asking.
+ */
+const NEON_DEFAULT_DATABASE = "neondb";
+
+/**
  * Roles Neon provisions for the Auth / Data API (PostgREST) stack. They exist to back
  * RLS-scoped Data API requests authenticated by JWT — never to hold a `DATABASE_URL` —
  * so they're skipped when auto-picking the connection role. Enabling Neon Auth or the
@@ -420,9 +427,11 @@ export interface FetchEnvOptions {
 	 */
 	roleName?: string;
 	/**
-	 * Database name. When omitted, the only database on the branch is auto-picked; throws
-	 * {@link PlatformError} with `PLATFORM_AMBIGUOUS_BRANCH_AUTH` if the branch has more
-	 * than one database.
+	 * Database name. When omitted, it is auto-picked: Neon's default `neondb` if present,
+	 * else the only database on the branch. Throws {@link PlatformError} with
+	 * `PLATFORM_AMBIGUOUS_BRANCH_AUTH` when the branch has several databases and none is
+	 * `neondb` (pass `databaseName` to disambiguate), and `PLATFORM_BRANCH_NOT_FOUND` when
+	 * the branch has no databases or the requested `databaseName` does not exist.
 	 */
 	databaseName?: string;
 	/**
@@ -505,7 +514,6 @@ export async function fetchEnv<const C extends Config>(
 	const databaseName = pickDatabaseName(
 		databases,
 		branch,
-		roleName,
 		options.databaseName,
 	);
 
@@ -876,7 +884,6 @@ function pickRoleName(
 function pickDatabaseName(
 	databases: NeonDatabaseSnapshot[],
 	branch: NeonBranchSnapshot,
-	roleName: string,
 	requested: string | undefined,
 ): string {
 	if (requested) {
@@ -908,17 +915,21 @@ function pickDatabaseName(
 			{ details: { branchId: branch.id } },
 		);
 	}
+
+	// Prefer Neon's default `neondb`. On the common "added a second database" branch this
+	// auto-picks it, so a lone or `neondb`-including branch resolves without asking.
+	const neondb = databases.find((d) => d.name === NEON_DEFAULT_DATABASE);
+	if (neondb) return neondb.name;
+
 	if (databases.length === 1) return databases[0].name;
 
-	// Prefer a database owned by the role we're connecting as.
-	const owned = databases.filter((d) => d.ownerName === roleName);
-	if (owned.length === 1) return owned[0].name;
-
+	// Several databases and no `neondb` to fall back on. Auto-picking any of them would be
+	// perceived as random and is bad DX, so fail loudly and let the caller disambiguate.
 	throw new PlatformError(
 		ErrorCode.AmbiguousBranchAuth,
 		[
-			`fetchEnv: branch ${branch.name} (${branch.id}) has ${databases.length} databases; cannot auto-pick.`,
-			`Pass \`databaseName\` explicitly. Available: ${databases.map((d) => d.name).join(", ")}.`,
+			`fetchEnv: branch ${branch.name} (${branch.id}) has ${databases.length} databases and none is named "${NEON_DEFAULT_DATABASE}"; cannot auto-pick.`,
+			`Rename one to "${NEON_DEFAULT_DATABASE}" or keep a single database on the branch (or, when calling fetchEnv directly, pass \`databaseName\`). Available: ${databases.map((d) => d.name).join(", ")}.`,
 		].join(" "),
 		{
 			details: {
