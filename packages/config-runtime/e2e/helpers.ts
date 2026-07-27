@@ -4,7 +4,9 @@ import { createNeonClient } from "@neon/sdk";
 import {
 	deleteProject as rawDeleteProject,
 	getProject as rawGetProject,
+	listProjectBranches as rawListProjectBranches,
 	listProjects as rawListProjects,
+	updateProjectBranch as rawUpdateProjectBranch,
 } from "@neon/sdk/raw";
 import { test } from "vitest";
 
@@ -16,10 +18,32 @@ import { test } from "vitest";
 const PROJECT_PREFIX = "neon-ts-e2e-";
 
 /**
+ * Projects younger than this are assumed to belong to a run that is still in flight. CI
+ * runs several suites against one shared org, so {@link sweepOrphans} must never delete a
+ * sibling run's project out from under it. Comfortably longer than a full suite.
+ */
+const ORPHAN_MIN_AGE_MS = 60 * 60 * 1000;
+
+/**
  * Default Neon region used by every e2e test that creates a project. Override per-test
  * by passing `region` to `defineConfig`.
  */
 export const DEFAULT_REGION = "aws-us-east-2";
+
+/**
+ * Pins every create and list to one organization. Redundant for an org-scoped API key,
+ * which can't see anything else anyway, but essential for a user-scoped key: without it
+ * {@link sweepOrphans} would range over every org the user belongs to.
+ */
+function configuredOrgId(): string | undefined {
+	const value = process.env.NEON_ORG_ID?.trim();
+	return value ? value : undefined;
+}
+
+function orgQuery(): { org_id?: string } {
+	const org = configuredOrgId();
+	return org ? { org_id: org } : {};
+}
 
 /** Generate a project name guaranteed not to collide with anything else in the org. */
 export function uniqueProjectName(suffix?: string): string {
@@ -33,7 +57,7 @@ function requireApiKey(): string {
 	const key = process.env.NEON_API_KEY;
 	if (!key || key.trim() === "") {
 		throw new Error(
-			"NEON_API_KEY is not set. Create packages/config/.env (see .env.example) before running test:e2e.",
+			"NEON_API_KEY is not set. Create packages/config-runtime/.env (see .env.example) before running test:e2e.",
 		);
 	}
 	return key;
@@ -53,9 +77,11 @@ export async function bootstrapProject(
 	api: NeonApi,
 	args: { name: string; region: string },
 ): Promise<string> {
+	const org = configuredOrgId();
 	const created = await api.createProject({
 		name: args.name,
 		regionId: args.region,
+		...(org ? { orgId: org } : {}),
 	});
 	return created.id;
 }
@@ -98,7 +124,12 @@ export async function detectApiKeyScope(): Promise<ApiKeyScope> {
 	if (cachedScope) return cachedScope;
 	const client = makeRawClient();
 	try {
-		unwrap(await rawListProjects({ client, query: { limit: 1 } }));
+		unwrap(
+			await rawListProjects({
+				client,
+				query: { limit: 1, ...orgQuery() },
+			}),
+		);
 		cachedScope = { kind: "org-or-user", canCreate: true };
 		return cachedScope;
 	} catch (err) {
@@ -110,7 +141,7 @@ export async function detectApiKeyScope(): Promise<ApiKeyScope> {
 	if (!fixedProjectId || fixedProjectId.trim() === "") {
 		throw new Error(
 			"API key cannot list projects (looks project-scoped) and NEON_PROJECT_ID is not set. " +
-				"Set NEON_PROJECT_ID in packages/config/.env to target a fixed project for the bounded e2e subset.",
+				"Set NEON_PROJECT_ID in packages/config-runtime/.env to target a fixed project for the bounded e2e subset.",
 		);
 	}
 	cachedScope = {
@@ -147,8 +178,10 @@ async function deleteProject(projectId: string): Promise<void> {
 		);
 	}
 	// Retry on 423 (locked while a previous mutation is in flight) so cleanup is robust.
+	// A 422 means a branch is still protected; clear the flag once and try again.
 	const maxAttempts = 12;
 	let delay = 500;
+	let unprotected = false;
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		try {
 			unwrap(
@@ -163,6 +196,11 @@ async function deleteProject(projectId: string): Promise<void> {
 				err as { response?: { status?: number } } | undefined
 			)?.response?.status;
 			if (status === 404 || status === 410) return;
+			if (status === 422 && !unprotected) {
+				unprotected = true;
+				await unprotectBranches(client, projectId);
+				continue;
+			}
 			if (status !== 423 || attempt === maxAttempts) throw err;
 			await sleep(delay);
 			delay = Math.min(delay * 2, 5_000);
@@ -171,27 +209,61 @@ async function deleteProject(projectId: string): Promise<void> {
 }
 
 /**
- * List every project whose name starts with {@link PROJECT_PREFIX} and delete them.
- * Called once at suite start to mop up orphans from a previous failed run.
+ * Neon refuses to delete a project while any of its branches is protected, and
+ * `lifecycle.e2e.test.ts` leaves the default branch that way on purpose. Without clearing
+ * the flag the project is undeletable — not just by the test that made it, but by
+ * {@link sweepOrphans} too, so it would sit in the org forever.
+ */
+async function unprotectBranches(
+	client: ReturnType<typeof makeRawClient>,
+	projectId: string,
+): Promise<void> {
+	const body = unwrap(
+		await rawListProjectBranches({
+			client,
+			path: { project_id: projectId },
+		}),
+	);
+	for (const branch of body.branches) {
+		if (!branch.protected) continue;
+		unwrap(
+			await rawUpdateProjectBranch({
+				client,
+				path: { project_id: projectId, branch_id: branch.id },
+				body: { branch: { protected: false } },
+			}),
+		);
+	}
+}
+
+/**
+ * List every project whose name starts with {@link PROJECT_PREFIX} and is older than
+ * {@link ORPHAN_MIN_AGE_MS}, then delete them. Called once at suite start to mop up
+ * orphans from a previous failed run without touching a concurrent run's projects.
  */
 export async function sweepOrphans(): Promise<{ swept: string[] }> {
 	const scope = await detectApiKeyScope();
 	if (scope.kind === "project") return { swept: [] };
 	const client = makeRawClient();
 	const swept: string[] = [];
+	const cutoff = Date.now() - ORPHAN_MIN_AGE_MS;
 	let cursor: string | undefined;
 	while (true) {
 		const body = unwrap(
 			await rawListProjects({
 				client,
-				query: { limit: 100, ...(cursor ? { cursor } : {}) },
+				query: {
+					limit: 100,
+					...orgQuery(),
+					...(cursor ? { cursor } : {}),
+				},
 			}),
 		);
 		for (const project of body.projects) {
-			if (project.name.startsWith(PROJECT_PREFIX)) {
-				await deleteProject(project.id);
-				swept.push(project.id);
-			}
+			if (!project.name.startsWith(PROJECT_PREFIX)) continue;
+			if (Date.parse(project.created_at) > cutoff) continue;
+			await deleteProject(project.id);
+			swept.push(project.id);
 		}
 		const next = (body as { pagination?: { next?: string } }).pagination
 			?.next;
@@ -222,12 +294,23 @@ export const e2eTest = test.extend<{
 				// Surface, but don't fail on cleanup errors — the orphan sweep on the next
 				// run will mop up anything we miss.
 				console.error(
-					`[e2e cleanup] failed to delete ${projectId}: ${(err as Error).message}`,
+					`[e2e cleanup] failed to delete ${projectId}: ${describeError(err)}`,
 				);
 			}
 		}
 	},
 });
+
+/**
+ * {@link unwrap} throws a bare `{ response: { status } }`, not an `Error`, so reading
+ * `.message` off it reports `undefined` and hides why cleanup failed.
+ */
+function describeError(err: unknown): string {
+	if (err instanceof Error) return err.message;
+	const status = (err as { response?: { status?: number } } | undefined)
+		?.response?.status;
+	return status ? `HTTP ${status}` : String(err);
+}
 
 /**
  * Some Neon operations are eventually consistent (notably branch creation finishing
