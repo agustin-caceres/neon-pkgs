@@ -61,19 +61,74 @@ CLI package, which keeps its own toolchain).
 
 ## Live Neon e2e tests
 
-`pnpm test:e2e:live` runs the `@neon/config`, `@neon/config-runtime`, and `@neon/env` e2e suites
-against the real Neon API, creating and deleting real projects. They are excluded from
-`pnpm test:ci`, so you only pay for them when you ask for them.
+`pnpm test:e2e:live` runs the `@neon/sdk`, `@neon/config`, `@neon/config-runtime`, `@neon/env`,
+and `neon` (the CLI) e2e suites against the real Neon API, creating and deleting real projects. The
+CLI suite spawns the built binary and parses its JSON output. All of them are excluded
+from `pnpm test:ci`, so you only pay for them when you ask for them.
 
-Copy each package's `.env.example` to `.env` and fill in `NEON_API_KEY` with an **org-scoped key
-for a throwaway organization**. The suite deletes stale `neon-ts-e2e-*` projects on start, so
-never point it at an org holding anything you care about. If your key is user-scoped rather than
-org-scoped, set `NEON_ORG_ID` as well to keep the sweep inside a single org. The org must be on
-the Launch plan or above — one test protects a branch, which the free plan disallows.
+### Setup
 
-In CI these run as the `e2e (live Neon)` workflow on every pull request from this repository.
+You need a Neon organization you are willing to lose. **The suites delete every project named
+`neon-ts-e2e-*` that the key can see**, so never point them at an org holding anything you care
+about, and never at a personal or production one. The org must be on the **Launch plan or
+above** — one test protects a branch, which the free plan disallows.
+
+1. Create a throwaway organization in the [Neon console](https://console.neon.tech).
+2. Create an **organization-scoped** API key in that org's settings. Org-scoped matters: the key
+   physically cannot see anything outside that org, so the cleanup sweep can't reach your other
+   projects. A user-scoped key works too, but then `NEON_ORG_ID` is effectively required.
+3. Copy any package's `.env.example` to a `.env` **at the repository root** and fill it in. All
+   five suites read the root file, so you configure this once:
+
+   ```bash
+   cp packages/sdk/.env.example .env
+   ```
+
+   ```bash
+   NEON_API_KEY=napi_...                    # the org-scoped key from step 2
+   NEON_ORG_ID=org-...                      # the throwaway org
+   ```
+
+4. Run them:
+
+   ```bash
+   pnpm test:e2e:live                       # all five suites
+   pnpm --filter @neon/sdk test:e2e         # just one
+   ```
+
+### Environment variables
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `NEON_API_KEY` | yes | Org-scoped key for the throwaway org |
+| `NEON_ORG_ID` | recommended | Pins project creation, listing and cleanup to one org. Required in practice for a user-scoped key |
+| `NEON_PROJECT_ID` | only for project-scoped keys | Targets a fixed project; tests that need to create one skip themselves |
+| `NEON_API_BASE_URL` | no | Point at a non-production API. Defaults to `https://console.neon.tech/api/v2` |
+
+Values resolve highest-priority-first: a real environment variable, then the package's own
+`.env`, then the repository-root `.env`. So exporting a variable in your shell overrides the
+file, and a package-local `.env` overrides the root one when you need a single suite to differ.
+
+`.env` files are gitignored (`.env.example` is the tracked exception). Don't commit one.
+
+Adding a **new** variable? Read it through `tests/e2e-harness`, add it to every package's
+`.env.example` and to the table above, and — for CI — see the "How CI supplies them" steps in
+[`AGENTS.md`](./AGENTS.md), which cover the repository secret or variable and the workflow
+mapping.
+
+### In CI
+
+These run as the `e2e (live Neon)` workflow on every pull request from this repository, using a
+maintained throwaway org. The workflow maps the repository secret `NEON_TEST_API_KEY` onto
+`NEON_API_KEY` and the repository variable `NEON_TEST_ORG_ID` onto `NEON_ORG_ID`, so the
+contract is identical to your local one.
+
 Fork and Dependabot PRs skip the job, because GitHub does not expose repository secrets to
-untrusted pull request code; a maintainer runs the suite before merging those.
+untrusted pull request code. **You do not need credentials to contribute** — open the PR and a
+maintainer will run the suite before merging.
+
+The shared plumbing lives in `tests/e2e-harness`, a private workspace package that is never
+published; see its README for the cleanup rules it enforces.
 
 ## Changing the supported Node floor
 

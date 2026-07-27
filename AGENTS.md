@@ -40,18 +40,18 @@ pnpm --filter vite-plugin-neon-new test
 
 #### Live Neon e2e tests
 
-`pnpm test:e2e:live` runs the `@neon/config`, `@neon/config-runtime`, and `@neon/env`
-e2e suites against the **real Neon Management API**. They create Postgres projects,
-mutate branches, read connection strings, and delete everything again. They are
-excluded from `pnpm test:ci` (each package's Vitest config excludes `**/*.e2e.test.ts`)
-and only run through their own `test:e2e` script.
+`pnpm test:e2e:live` runs the `@neon/sdk`, `@neon/config`, `@neon/config-runtime`,
+`@neon/env`, and `neon` (the CLI) e2e suites against the **real Neon Management API**. They
+create Postgres projects, mutate branches, read connection strings, and delete
+everything again. They are excluded from `pnpm test:ci` (each package's Vitest config
+excludes the e2e files) and only run through their own `test:e2e` script.
 
 Run them against a **dedicated throwaway organization** — never a personal or
 production one. The suite sweeps stale `neon-ts-e2e-*` projects on start, so any
 project matching that prefix in reach of the key is fair game for deletion.
 
 ```bash
-cp packages/config/.env.example packages/config/.env   # and the same for config-runtime + env
+cp packages/sdk/.env.example .env   # repo root: one file for all five suites
 # Fill in NEON_API_KEY with an org-scoped key for the throwaway org.
 # Set NEON_ORG_ID too when the key is user-scoped, so the sweep stays inside one org.
 pnpm test:e2e:live
@@ -61,12 +61,89 @@ pnpm test:e2e:live
 | --- | --- |
 | **Workflow** | `.github/workflows/e2e-live.yml` — every PR, every push to `main`, plus `workflow_dispatch` |
 | **Org** | `org-autumn-tree-56376911` ("neon-pkgs Integration Test Org"), Launch plan |
-| **Secrets** | Repository secret `NEON_TEST_API_KEY` → `NEON_API_KEY`; repository variable `NEON_TEST_ORG_ID` → `NEON_ORG_ID` |
 | **Skipped for** | Fork and Dependabot PRs — GitHub does not expose repository secrets to untrusted PR code |
 | **Runner** | Protected runner group. Unlike `neon.com` and `models.dev`, the Neon **API** is reachable from it |
 
 The org needs the **Launch plan or above**: `lifecycle.e2e.test.ts` protects a branch
 through `pushConfig`, and the free plan allows zero protected branches.
+
+##### Environment variables
+
+Every variable the live suites read, and where it comes from:
+
+| Variable | Required | Read by | Meaning |
+| --- | --- | --- | --- |
+| `NEON_API_KEY` | yes | all five suites, via `requireApiKey()` | Org-scoped key for the throwaway org |
+| `NEON_ORG_ID` | recommended | harness `configuredOrgId()`; the CLI suite maps it to `--org-id` | Pins create, list and sweep to one org. **Required in practice for a user-scoped key**, or the sweep ranges over every org the key can see |
+| `NEON_PROJECT_ID` | only for project-scoped keys | harness `detectApiKeyScope()` | Targets a fixed project; create-paths skip themselves |
+| `NEON_API_BASE_URL` | no | harness `api.ts` | Point the harness at a non-production API. Defaults to `https://console.neon.tech/api/v2` |
+| `NEON_AI_GATEWAY_BASE_URL`, `NEON_AI_GATEWAY_TOKEN` | for that suite only | `@neon/ai-sdk-provider` | Live AI Gateway. **Not** part of `test:e2e:live` |
+
+**Resolution order**, highest priority first — implemented in the harness's `loadEnv`:
+
+1. A real environment variable. Always wins; this is how CI injects secrets with no
+   file on disk.
+2. The package's own `.env` (`packages/sdk/.env`, …). Use this only to override one
+   suite.
+3. A `.env` at the repository root. The normal place to put credentials — all five
+   suites read it, so you configure them once.
+
+`.gitignore` covers `.env` and `.env.*` with a `!.env.example` negation, so the
+examples stay tracked and real credentials cannot be committed. Never add a `.env` to
+a commit, even a "redacted" one.
+
+**Getting an org-scoped key:** create the key in the Neon console under the throwaway
+org's settings, or via the API with a token for an account that administers it:
+
+```bash
+curl -X POST "https://console.neon.tech/api/v2/organizations/<org-id>/api_keys" \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"key_name":"neon-pkgs-ci-e2e"}'
+```
+
+Org-scoped is strongly preferred over user-scoped: the key can only see the throwaway
+org, so the orphan sweep physically cannot reach anything else.
+
+##### How CI supplies them, and adding a new one
+
+The workflow maps repository secrets and variables onto the same env var names the
+suites read locally, so there is one contract rather than two:
+
+```yaml
+env:
+    NEON_API_KEY: ${{ secrets.NEON_TEST_API_KEY }}
+    NEON_ORG_ID: ${{ vars.NEON_TEST_ORG_ID }}
+```
+
+**Secret or variable?** Secret if leaking it grants access to something — API keys,
+tokens, passwords. Variable if it's an identifier you would happily paste into a PR
+description, like an org id. Variables are readable in logs and in the Actions UI,
+which makes debugging a misconfigured run much easier, so don't reach for a secret out
+of habit.
+
+To wire up a **new** variable end to end:
+
+1. **Read it through the harness**, not `process.env` scattered across tests. Add an
+   accessor in `tests/e2e-harness/src/env.ts` next to `configuredOrgId()` so the
+   default and the "missing" error message live in one place.
+2. **Document it in every `.env.example`** — `packages/{sdk,config,config-runtime,env,cli}/.env.example`.
+   They are near-identical on purpose: a contributor copies whichever one they find.
+3. **Add it to the table above** and, if contributors need it, to `CONTRIBUTING.md`.
+4. **Store it on the repository** (needs admin on `neondatabase/neon-pkgs`):
+
+   ```bash
+   gh secret set NEON_TEST_SOMETHING   --repo neondatabase/neon-pkgs --body "<value>"
+   gh variable set NEON_TEST_SOMETHING --repo neondatabase/neon-pkgs --body "<value>"
+   ```
+
+5. **Map it in the workflow's `env:` block** in `.github/workflows/e2e-live.yml`,
+   using the local name as the key and `secrets.*` / `vars.*` as the value.
+6. **Verify on a PR from this repository.** Fork PRs get neither secrets nor variables,
+   so the job is skipped there and a green fork run proves nothing about the wiring.
+
+Prefer making a new variable **optional with a sane default**. A required variable
+breaks every existing checkout the moment it lands, and the failure surfaces as a
+confusing mid-suite error rather than a clear setup message.
 
 Suites run one at a time (`--workspace-concurrency=1`) because they share one org, and
 with `--no-bail` so one failure neither hides the other suites' results nor aborts a
@@ -77,6 +154,87 @@ in-flight project is never deleted underneath it.
 `@neon/ai-sdk-provider` also has a `test:e2e`, but it targets a live AI Gateway with a
 different pair of credentials (`NEON_AI_GATEWAY_BASE_URL`, `NEON_AI_GATEWAY_TOKEN`) and
 is not part of `test:e2e:live`.
+
+##### The shared harness (`tests/e2e-harness`)
+
+`@neon/e2e-harness` is a **private, never-published** workspace package holding the
+plumbing every live suite needs: the `.env` contract, key-scope detection, project
+create/delete, the orphan sweep, and the `e2eTest` fixture. It has no build step —
+consumers import its TypeScript source.
+
+It lives in a top-level `tests/` folder rather than under `packages/` so that
+`packages/` keeps meaning exactly one thing: packages we publish. It's still a
+workspace package — listed explicitly in `pnpm-workspace.yaml` and depended on with
+`workspace:*` — because the alternative is every suite reaching across package roots
+with `../../../tests/e2e-harness` paths, which fights both `tsc -p` and the CLI's
+`moduleResolution: node` mappings for no benefit.
+
+It exists because cleanup is the dangerous part, and three copies of it meant fixing
+every bug three times. Three invariants live there and nowhere else:
+
+1. **Prefix guard** — never delete a project not named `neon-ts-e2e-*`.
+2. **Age guard** — never sweep a project created in the last hour; it probably belongs
+   to a concurrent run.
+3. **Unprotect before delete** — Neon rejects a delete with 422 while a branch is
+   protected, and an un-cleared flag makes the project unreachable by *any* later
+   cleanup.
+
+A fourth rule governs setup rather than teardown: `createProject` waits until the
+project is actually usable. "Created" and "usable" are different states — Neon rejects
+the next mutation with `project already has running conflicting operations` while
+provisioning is in flight — so returning early would just move that race into every
+caller.
+
+**It deliberately does not use `@neon/sdk`.** The SDK is one of the packages under
+test, so plumbing built on it would break teardown at exactly the moment a test
+catches an SDK bug. The harness uses plain `fetch` and has zero runtime dependencies,
+which also keeps the workspace graph acyclic.
+
+Suites keep a thin local `e2e/helpers.ts` for whatever *is* their subject under test —
+`@neon/config` and friends bootstrap projects through their own `NeonApi` adapter
+rather than the harness's `createProject`, because that adapter is what they're
+testing.
+
+##### What the `@neon/sdk` suite covers
+
+The SDK's unit tests answer every request with a canned `fetch` response, which proves
+the mapping logic but cannot prove the API still returns the shape that logic was
+written against. `packages/sdk/e2e/` targets exactly that gap across three files:
+
+- **`workflows`** — `createAndConnect` with readiness polling, the client's `orgId`
+  default, cursor pagination against cursors the API actually issues (`branches.list`
+  reads `pagination.next` while `projects.list` reads `pagination.cursor`, so a stub
+  can only confirm whichever the author picked), and `postgres.connectionString`
+  auto-resolving branch, role, and database.
+- **`resources`** — the CRUD spine on one shared project: branch create/get/update/
+  delete, `createWithCompute`, roles (including that `password` returns a bare string
+  while `resetPassword` returns a `Role`), databases, endpoints, and
+  `operations.waitFor` recognising terminal states.
+- **`errors`** — `toNeonError` against real 404 and 401 envelopes, `throwOnError`
+  narrowing, the raw layer's `Response`, and the org-key scope boundary.
+
+Note what an **org-scoped** key cannot reach: `user.me()`, `apiKeys.list()`, and
+`regions.list()` all answer `404 "not allowed for organization API keys"`. That's why
+those namespaces aren't covered — not because they don't matter.
+
+##### What the CLI (`neon`) suite covers
+
+`packages/cli/e2e/` spawns the built binary (`dist/cli.js`, the real `bin` entry) and
+parses `--output json`. The CLI's unit tests answer every request from a local
+`emocks` fixture server, so they verify argument plumbing and output formatting but
+never that a command still works against Neon.
+
+Each invocation is hermetic: `--api-key` from the environment, plus `--config-dir` and
+`--context-file` pointed at temp directories so a developer's real credentials or a
+stray `.neon` in the checkout can't leak into a run. `--no-analytics` keeps Segment
+out of it.
+
+`test:e2e` builds first, because unlike the other packages the CLI has no `prepare`
+script and `pnpm install` therefore leaves `dist/` stale.
+
+One thing to know: **the CLI does not read `NEON_ORG_ID`.** It takes the org from
+`--org-id` or a `.neon` context file, so the suite's `orgArgs()` helper translates the
+harness's env var into the flag.
 
 ### Linting & Formatting
 
@@ -122,14 +280,14 @@ and `@neon/functions`.
 
 ### The CLI package (`packages/cli`)
 
-`packages/cli` is the **Neon CLI**, migrated from [`neondatabase/neonctl`](https://github.com/neondatabase/neonctl), and is published as **`neon`**. `packages/neonctl` is a lightweight compatibility package whose executable imports `neon/cli`; it contains no CLI implementation or build output. The two packages are a Changesets fixed group and release at the same version. The primary package is linted/formatted with Biome like the rest of the repo, but its **build** toolchain differs:
+`packages/cli` is the **Neon CLI**, migrated from [`neondatabase/neonctl`](https://github.com/neondatabase/neonctl). It is published as **`neonctl`** today and is being rebranded to **`neon`** (with thin `neonctl`/`neoncli` packages that depend on it and forward to it). It is linted/formatted with Biome like the rest of the repo, but its **build** toolchain differs:
 
 -   **Build**: `pnpm --filter <name> build` runs swagger param generation (`generateOptionsFromSpec.ts` → `src/parameters.gen.ts`, a committed generated file), then `tsc -p tsconfig.build.json` to `dist/`, then copies `callback.html` into `dist/`. It compiles file-by-file with `tsc` (not bundled with tsdown) and **publishes from the package root** (`bin: dist/cli.js`, `files: ["dist", …]`). The param generator reads the OpenAPI spec from the `@neon/sdk` workspace package's vendored copy (`../sdk/spec/neon-openapi.json`, kept in sync via its `spec:pull` script), so it works offline within the monorepo.
 -   **Lint**: Biome, via a `packages/cli/**` override in the root `biome.json` (relaxes some rules for the migrated upstream code, and enforces `noConsole` since the CLI routes all output through its writer/logger). Root `pnpm lint:ci` (`biome ci`) covers it. `pnpm --filter <name> lint` additionally runs `tsc --noEmit` then `biome check src`.
 -   **Coverage**: needs `@vitest/coverage-v8` because the root CI runs `pnpm test:ci --coverage` (the flag is appended to every package's `test:ci`). Pin it to the package's `vitest` major.
--   **Standalone binaries**: `pnpm --filter neon bundle` (`node pkg.js`) Rollup-bundles `dist/cli.js` and cross-compiles `linux-x64`, `linux-arm64`, `macos-x64`, and `win-x64` via `@yao-pkg/pkg`; targets/assets are declared in the package's `pkg` block. The binaries are named after the package, so they ship as `neon-<target>`.
+-   **Standalone binaries**: `pnpm --filter <name> bundle` (`node pkg.js`) Rollup-bundles `dist/cli.js` and cross-compiles `linux-x64`, `linux-arm64`, `macos-x64`, and `win-x64` via `@yao-pkg/pkg`; targets/assets are declared in the package's `pkg` block. `pkg.js` rewrites `bin` to the bundled entry, so it is name-agnostic (works as `neon` or `neonctl`).
 -   **Conformance tests** (`tests/psql-conformance`) need Docker/testcontainers and are excluded from the default Vitest run; run them explicitly with `pnpm --filter <name> test:conformance`.
--   **Sibling deps**: the `@neon/*` packages are `workspace:*`; only `neon-init` is still pinned to a published version (see the lockfile catch-22 below). Switching it to `workspace:*` is a planned follow-up.
+-   **Sibling deps**: `@neondatabase/*` + `neon-init` are currently pinned to published versions (not `workspace:*`); switching to `workspace:*` is a planned follow-up.
 
 ### The SDK package (`packages/sdk`)
 
@@ -279,10 +437,9 @@ registry pin creates a chicken-and-egg whenever a release bumps `neon-init`:
 2. **Sync the lockfile on `main`.** Now that the new `neon-init` is on npm, `pnpm install
    --lockfile-only` resolves it. Open a tiny `chore: sync lockfile for neon-init@<version>` PR
    (this is exactly what such historical PRs are). Its CI now passes because the lockfile matches.
-3. **Publish the rest from `main`**, leaf-first, CLI implementation before its compatibility package:
-   `@neon/config` → `@neon/config-runtime` / `@neon/env` → `neon` → `neonctl`.
-   Publishing `neon` also ships the standalone binaries and GitHub release. Verify each with
-   `npm view <pkg> version`.
+3. **Publish the rest from `main`**, leaf-first, CLI last:
+   `@neon/config` → `@neon/config-runtime` / `@neon/env` → `neonctl` (which also ships `neon`,
+   the standalone binaries, and the GitHub release). Verify each with `npm view <pkg> version`.
 
 If a release does **not** touch `neon-init`, none of this applies — the lockfile stays consistent
 (`workspace:*` deps don't change it) and you can publish leaf-first / CLI-last straight from `main`.
@@ -301,13 +458,9 @@ The CLI publishes from this monorepo via the same external workflow as every oth
   workflow also cross-compiles the `@yao-pkg/pkg` binaries and attaches them to a **GitHub release on
   `neondatabase/neon-pkgs`** (tag `<name>@<version>`). The old standalone `neonctl` repo release
   pipeline is retired.
-- **Compatibility command**: `neonctl` is a thin package that depends on `neon` (`workspace:*`)
-  and owns only the legacy `neonctl` executable. Publish `neon` first, verify it on npm, then
-  publish `neonctl` with the same workflow (`-f package=neonctl`). It has no binaries.
-- **Homebrew**: `brew install neonctl` is a homebrew-core formula built from the npm `neonctl`
-  tarball (autobumped by Homebrew's bot), not something this repo publishes. It relies on that
-  package providing **both** the `neonctl` and `neon` commands — don't narrow the shim's `bin` map;
-  see `docs/neonctl-compatibility-shim.md`.
+- **Forwarders**: `neonctl` and `neoncli` are thin packages that depend on `neon` (`workspace:*`);
+  publish them with the same workflow (`-f package=neonctl`, `-f package=neoncli`). They have no
+  binaries.
 
 ### Best Practices
 

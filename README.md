@@ -43,6 +43,7 @@ A few renamed packages are still published as deprecated aliases (`get-db` / `ne
 
 ```
 packages/   # the published SDKs, libraries, CLIs, and plugins (one per folder)
+tests/      # test-only tooling that is never published (the live Neon e2e harness)
 examples/   # runnable examples that consume the packages via the workspace
 ```
 
