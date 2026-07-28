@@ -83,13 +83,34 @@ The `error` channel carries a typed hierarchy (all `Error` subclasses with a `ki
 | `NeonRateLimitError` | `"rate_limit"` | (429, after retries) |
 | `NeonOperationError` | `"operation"` | `operationId`, `status` — an awaited operation failed |
 | `NeonTimeoutError` | `"timeout"` | readiness/wait deadline exceeded |
-| `NeonNetworkError` | `"network"` | transport failure (no response) |
+| `NeonNetworkError` | `"network"` | `reason` — transport failure (no response) |
 | `NeonError` | `"client"` | SDK-side errors (e.g. ambiguous connection-string selection) |
 
 ```ts
 const { error } = await neon.branches.get(pid, "nope");
 if (error?.kind === "not_found") { /* … */ }
 ```
+
+Branch on `kind` rather than `name` or `message`. `name` is a stable string literal on every
+class, so it survives bundling, but `message` is not a contract.
+
+`NeonNetworkError.reason` carries the most specific reason the platform gave — an `errno`
+code such as `ECONNRESET` when one is available, otherwise the innermost non-empty message.
+It is also interpolated into `message`, so transport faults are distinguishable in logs and
+error trackers instead of collapsing onto one string:
+
+```ts
+const { error } = await neon.projects.get(id);
+if (error?.kind === "network") {
+  error.reason; // "ECONNRESET"
+  error.message; // 'Network error: no response received from the Neon API (ECONNRESET).'
+}
+```
+
+Validating ids and other path parameters before passing them in is the caller's
+responsibility. An empty path parameter builds a URL with an empty segment, which the Neon
+API answers with a redirect rather than a `400`; that can surface as a `"network"` error
+rather than anything that names the argument.
 
 ## Pagination
 
