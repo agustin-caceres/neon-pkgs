@@ -186,22 +186,23 @@ describe("fetchEnv", () => {
 		);
 	});
 
-	test("falls back to the supplied env source when the snapshot omits base URL", async () => {
+	test("reports an empty base URL when the snapshot omits one", async () => {
+		// fetchEnv returns what the API returns and nothing else — no env source to fall back
+		// on. Recovering a pre-`base_url` integration's persisted value is the reuse wrapper's
+		// job (see reuse-secrets.test.ts), which is the only caller that has the old value.
 		const { api, projectId } = seededFake();
 		api.seedNeonAuth(projectId, "br-main", {
 			projectId: "auth-br-main",
 			jwksUrl: "https://example.com/jwks.json",
 		});
-		const config = defineConfig({ auth: true });
 
-		const env = await fetchEnv(config, {
+		const env = await fetchEnv(defineConfig({ auth: true }), {
 			api,
 			projectId,
 			branchId: "br-main",
-			env: { NEON_AUTH_BASE_URL: "https://auth.example.com" },
 		});
 
-		expect(env.auth.baseUrl).toBe("https://auth.example.com");
+		expect(env.auth.baseUrl).toBe("");
 		// jwks_url is always returned by the snapshot, so it comes from there.
 		expect(env.auth.jwksUrl).toBe("https://example.com/jwks.json");
 	});
@@ -752,38 +753,38 @@ describe("branch storage + AI Gateway (Preview)", () => {
 		]);
 	});
 
-	test("round-trips a persisted credential instead of re-minting", async () => {
+	test("keys: selecting only non-secret storage vars mints no credential", async () => {
+		// The mechanism the reuse wrapper is built on. Endpoint and region are branch metadata,
+		// so a caller that already holds valid secrets can refresh them without spending a
+		// credential — which is what makes reuse possible at all.
 		const { api, projectId } = seededFake();
-		const config = defineConfig({ preview: { buckets: { uploads: {} } } });
-		const first = await fetchEnv(config, {
-			api,
-			projectId,
-			branchId: "br-main",
-		});
-		const persisted = toEntries(first);
-		const second = await fetchEnv(config, {
-			api,
-			projectId,
-			branchId: "br-main",
-			env: { ...process.env, ...persisted },
-		});
-		expect(callsTo(api, "createCredential")).toBe(1); // not minted again
-		expect(second.storage.accessKeyId).toBe(first.storage.accessKeyId);
-		expect(second.storage.secretAccessKey).toBe(
-			first.storage.secretAccessKey,
+
+		const env = await fetchEnv(
+			defineConfig({ preview: { buckets: { uploads: {} } } }),
+			{
+				api,
+				projectId,
+				branchId: "br-main",
+				keys: ["AWS_ENDPOINT_URL_S3", "AWS_REGION"],
+			},
 		);
+
+		expect(callsTo(api, "createCredential")).toBe(0);
+		expect(callsTo(api, "getProjectBranchStorage")).toBe(1);
+		expect(env.storage.endpoint).toContain("storage");
+		expect(env.storage.region).toBe("us-east-1");
+		// The secrets weren't asked for, so they aren't there.
+		expect("accessKeyId" in env.storage).toBe(false);
+		expect(toEntries(env)).toEqual({
+			AWS_ENDPOINT_URL_S3: env.storage.endpoint,
+			AWS_REGION: "us-east-1",
+		});
 	});
 
-	test("re-mints when a newly-enabled feature's secret is absent", async () => {
+	test("keys: selecting a secret var does mint, and drops the vars not asked for", async () => {
 		const { api, projectId } = seededFake();
-		// Persist a storage-only credential, then ask for a policy that also needs the AI Gateway
-		// (NEON_AI_GATEWAY_TOKEN is absent from the persisted env, so the credential must be re-minted).
-		const storageOnly = await fetchEnv(
-			defineConfig({ preview: { buckets: { uploads: {} } } }),
-			{ api, projectId, branchId: "br-main" },
-		);
-		const persisted = toEntries(storageOnly);
-		const widened = await fetchEnv(
+
+		const env = await fetchEnv(
 			defineConfig({
 				preview: { buckets: { uploads: {} }, aiGateway: true },
 			}),
@@ -791,12 +792,18 @@ describe("branch storage + AI Gateway (Preview)", () => {
 				api,
 				projectId,
 				branchId: "br-main",
-				env: { ...process.env, ...persisted },
+				keys: ["NEON_AI_GATEWAY_TOKEN", "DATABASE_URL"],
 			},
 		);
-		expect(callsTo(api, "createCredential")).toBe(2); // re-minted
-		expect(lastCreateScopes(api)).toContain("ai_gateway:invoke");
-		expect(widened.aiGateway.apiKey).toMatch(/^nt_live_/);
+
+		expect(callsTo(api, "createCredential")).toBe(1);
+		// Storage wasn't selected at all, so its endpoint was never read.
+		expect(callsTo(api, "getProjectBranchStorage")).toBe(0);
+		expect(env.aiGateway.apiKey).toMatch(/^nt_live_/);
+		expect(Object.keys(toEntries(env)).sort()).toEqual([
+			"DATABASE_URL",
+			"NEON_AI_GATEWAY_TOKEN",
+		]);
 	});
 
 	test("throws when buckets are declared but storage is not enabled on the branch", async () => {
@@ -809,6 +816,9 @@ describe("branch storage + AI Gateway (Preview)", () => {
 				branchId: "br-main",
 			}),
 		).rejects.toMatchObject({ code: ErrorCode.NotFound });
+		// The branch's storage settings are read before the credential is resolved, so a
+		// resolve that cannot succeed never spends a credential on the way to failing.
+		expect(callsTo(api, "createCredential")).toBe(0);
 	});
 
 	test("parseEnv reads injected storage env (sync, no network)", () => {

@@ -12,6 +12,15 @@ npm install @neon/env
 
 > **Requirements:** Node.js >= 20.19.
 
+## Two entry points
+
+| Import | What it holds |
+| --- | --- |
+| `@neon/env` | The pure half: `fetchEnv` asks the Neon API for a branch's env, `parseEnv` reads what was already injected. Neither touches the filesystem or reads an env source. This is what an app, a build script, or a `neon.ts` policy needs. |
+| `@neon/env/runtime` | The stateful half: `fetchEnvReusingSecrets`, for tools that resolve the same branch repeatedly and must not re-mint a credential each time. It reads an env source and can mint and revoke credentials. Import it from a CLI or CI, never from an app bootstrap. |
+
+The split mirrors [`@neon/config`](../config) vs [`@neon/config-runtime`](../config-runtime), for the same reason: side effects should be something you opt into by import path. Contributing to either half? See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
 ## Functions
 
 The library functions are **filesystem- and env-agnostic**: `fetchEnv` requires an explicit `projectId` + `branch` (a branch **name** like `main`, or a `br-…` id). (The `neon-env` CLI does the `.neon`/`NEON_*` resolution and passes these in.)
@@ -45,7 +54,8 @@ Both return the same namespaced `NeonEnv` shape: `postgres` is always present; `
 
 | Function | Description |
 | --- | --- |
-| `fetchEnv(config, { projectId, branch, ... })` | Async. Calls the Neon API for the given project + branch and returns live connection strings (and Auth/Data API values when enabled). `projectId` and `branch` are required; `branch` accepts a branch **name** (e.g. `main`) or a `br-…` id. (The legacy id-only `branchId` option still works.) |
+| `fetchEnv(config, { projectId, branch, ... })` | Async. Calls the Neon API for the given project + branch and returns live connection strings (and Auth/Data API values when enabled). `projectId` and `branch` are required; `branch` accepts a branch **name** (e.g. `main`) or a `br-…` id. (The legacy id-only `branchId` option still works.) Pass `keys` to fetch only some vars — see [Fetching a subset](#fetching-a-subset). Reads nothing from `process.env` or disk. |
+| `fetchEnvReusingSecrets(config, { projectId, branch, env })` | Async, from **`@neon/env/runtime`**. `fetchEnv` plus reuse of one-time secrets you already hold: verifies them against the branch, keeps what's valid, mints and revokes only when it must. Returns `{ vars, credential }`. Use this rather than `fetchEnv` anywhere the same branch is resolved repeatedly — see [The branch credential](#the-branch-credential). |
 | `parseEnv(config)` / `parseEnv(config, slug)` / `parseEnv(config, keys)` | Sync. Reads/validates the Neon env vars already present in `process.env` against the static policy toggles. With a function `slug`, also returns a typed `function` namespace of that function's declared env keys. With a `keys` array (e.g. `["DATABASE_URL"]`), only those vars are required and returned, as a narrowed namespaced shape — the keys are typesafe against the policy. Throws `PlatformError(EnvNotInjected)` listing missing vars when the env isn't populated. |
 | `toEntries(env)` | Project a resolved `NeonEnv` into `{ KEY: value }` pairs for cross-process transport (named after the web `.entries()` convention; returns a `Record`). |
 
@@ -120,6 +130,47 @@ These are the OS-level vars `fetchEnv` / `parseEnv` read and `toEntries` (so `ne
 | --- | --- |
 | `NEON_AI_GATEWAY_TOKEN` | branch credential's API token (bearer) |
 | `NEON_AI_GATEWAY_BASE_URL` | bare branch gateway host (`https://<branch>-api.ai.<region>.…`, no path) |
+
+### The branch credential
+
+Object storage and the AI Gateway are backed by one branch credential, and the Neon API returns its secrets (`s3_secret_access_key`, `api_token`) **once**, at mint time — they aren't stored server-side, and the list endpoint returns metadata only. So there is nothing to *fetch*: `fetchEnv` mints. Call it on every `neon dev` start and you leave a live credential behind each time.
+
+`fetchEnvReusingSecrets`, from the **`@neon/env/runtime`** entry point, is the wrapper that avoids that. It checks what you already hold, keeps what is still valid, and asks `fetchEnv` for only the rest:
+
+```ts
+import { fetchEnvReusingSecrets } from "@neon/env/runtime";
+
+const { vars, credential } = await fetchEnvReusingSecrets(config, {
+    projectId,
+    branch: "main",
+    env: { ...process.env, ...readEnvFile(".env") },
+});
+
+// vars: { DATABASE_URL: "…", AWS_ACCESS_KEY_ID: "…", … } — ready to write or inject
+if (credential.issued) {
+    console.log(`new values for ${credential.keys.join(", ")}`);
+    // credential.revoked holds the token ids it superseded
+}
+```
+
+The check is a real verification, not a presence test. A persisted secret is kept only when it names a credential that still exists on the branch, isn't revoked or expired, and carries every scope the policy needs. A `.env.example` placeholder, a credential revoked in the console, one copied from another branch, or one predating a newly-enabled feature all fail that check and get replaced — and the credential being replaced is revoked, so a branch doesn't accumulate one per call.
+
+No local bookkeeping backs this: `AWS_ACCESS_KEY_ID` **is** the credential's token id, and the AI Gateway token is minted as `nt_live_<tokenIdShort>_<secret>`, so the persisted secrets already name the credential that issued them.
+
+### Fetching a subset
+
+`fetchEnv` takes a `keys` filter, the same typesafe selection `parseEnv` accepts:
+
+```ts
+const { storage } = await fetchEnv(config, {
+    projectId,
+    branch: "main",
+    keys: ["AWS_ENDPOINT_URL_S3", "AWS_REGION"],
+});
+storage.endpoint; // string — `accessKeyId` is absent, and never fetched
+```
+
+Work is skipped, not just the result narrowed. Leave out `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `NEON_AI_GATEWAY_TOKEN` and **no credential is minted at all** — which is exactly how `fetchEnvReusingSecrets` refreshes everything else while keeping secrets you already have. The non-secret vars of those features (`AWS_ENDPOINT_URL_S3`, `AWS_REGION`, `NEON_AI_GATEWAY_BASE_URL`) are branch metadata and stay available on their own.
 
 ## Connection role & database selection
 

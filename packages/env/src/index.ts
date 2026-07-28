@@ -23,6 +23,7 @@ export type {
 	NeonFunctionEnv,
 	NeonPostgresEnv,
 	NeonStorageEnv,
+	ResolvedNeonEnv,
 	SelectableEnvKey,
 } from "./lib/env.js";
 export {
@@ -31,6 +32,9 @@ export {
 	parseEnv,
 	toEntries,
 } from "./lib/env.js";
+// The stateful counterpart — `fetchEnvReusingSecrets`, which reads an env source and can mint
+// and revoke credentials — lives at `@neon/env/runtime`, so this entry point stays the pure
+// "ask Neon, read process.env" surface an app or build script needs.
 
 // The branch policy type (`Config`) and `defineConfig` live in `@neon/config`.
 // Import them from there directly:

@@ -6,6 +6,7 @@ import {
 	ErrorCode,
 	type NeonApi,
 	type NeonBranchSnapshot,
+	type NeonBranchStorageSnapshot,
 	type NeonDatabaseSnapshot,
 	type NeonRoleSnapshot,
 	PlatformError,
@@ -339,6 +340,7 @@ export type NeonFunctionEnv<C extends Config, S extends string> = {
  */
 interface EnvKeysByNamespace {
 	postgres: "DATABASE_URL" | "DATABASE_URL_UNPOOLED";
+	branch: "NEON_BRANCH";
 	auth: "NEON_AUTH_BASE_URL" | "NEON_AUTH_JWKS_URL";
 	dataApi: "NEON_DATA_API_URL";
 	storage:
@@ -352,6 +354,7 @@ interface EnvKeysByNamespace {
 /** The {@link NeonEnv} namespace interface backing each namespace key. */
 interface NamespaceEnv {
 	postgres: NeonPostgresEnv;
+	branch: NeonBranchEnv;
 	auth: NeonAuthEnv;
 	dataApi: NeonDataApiEnv;
 	storage: NeonStorageEnv;
@@ -362,6 +365,7 @@ interface NamespaceEnv {
 interface EnvKeyToProp {
 	DATABASE_URL: "databaseUrl";
 	DATABASE_URL_UNPOOLED: "databaseUrlUnpooled";
+	NEON_BRANCH: "name";
 	NEON_AUTH_BASE_URL: "baseUrl";
 	NEON_AUTH_JWKS_URL: "jwksUrl";
 	NEON_DATA_API_URL: "url";
@@ -460,11 +464,6 @@ export interface FetchEnvOptions {
 	 * the branch has no databases or the requested `databaseName` does not exist.
 	 */
 	databaseName?: string;
-	/**
-	 * Env source used for one-time Auth keys that cannot be refetched after integration
-	 * creation. Defaults to `process.env`; callers may layer values from `.env.local`.
-	 */
-	env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -488,15 +487,270 @@ export interface FetchEnvOptions {
  * const db = drizzle(neon(env.postgres.databaseUrl), { schema });
  * ```
  *
- * The package does **not** mutate `process.env` or the filesystem itself.
+ * Pass `keys` to fetch only some of them — see the overload below.
+ *
+ * The package does **not** read `process.env`, mutate it, or touch the filesystem. Everything
+ * it returns comes from the Neon API, so a value the API cannot produce (a one-time secret
+ * issued to a previous call) is minted afresh rather than recovered. Callers that hold
+ * persisted secrets and want to keep them use {@link fetchEnvReusingSecrets}, which decides
+ * what is still valid and narrows this call's `keys` accordingly.
  */
+export async function fetchEnv<
+	const C extends Config,
+	const K extends SelectableEnvKey<C>,
+>(
+	config: C,
+	options: FetchEnvOptions & {
+		/**
+		 * Fetch only these OS-level env vars, instead of everything the policy enables. The
+		 * keys autocomplete from the policy ({@link SelectableEnvKey}), and the result is
+		 * narrowed to match ({@link FilteredNeonEnv}).
+		 *
+		 * The point is not just a smaller result: **work is skipped too.** Leave out
+		 * `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `NEON_AI_GATEWAY_TOKEN` and no branch
+		 * credential is minted at all, so a caller that already holds valid secrets can refresh
+		 * everything else without issuing a new one. The non-secret vars of the same features
+		 * (`AWS_ENDPOINT_URL_S3`, `AWS_REGION`, `NEON_AI_GATEWAY_BASE_URL`) are not
+		 * credential-backed and stay available on their own.
+		 *
+		 * The selection **intersects** with the policy rather than overriding it: naming a var
+		 * the branch policy does not enable is not an error, it simply yields nothing.
+		 */
+		keys: readonly K[];
+	},
+): Promise<FilteredNeonEnv<K>>;
 export async function fetchEnv<const C extends Config>(
 	config: C,
 	options: FetchEnvOptions,
-): Promise<NeonEnv<C>> {
+): Promise<NeonEnv<C>>;
+export async function fetchEnv(
+	config: Config,
+	options: FetchEnvOptions & { keys?: readonly string[] },
+): Promise<unknown> {
+	return fetchEnvKeys(config, options, options.keys ?? null);
+}
+
+/**
+ * The {@link fetchEnv} body, with the key selection as a plain argument and no generic
+ * narrowing. Exists for callers that compute the selection at runtime — notably
+ * {@link fetchEnvReusingSecrets}, which decides which keys it still needs by checking the
+ * branch — since the public overload's `keys` is bound to a literal union those callers cannot
+ * produce without asserting.
+ *
+ * `keys === null` selects everything the policy enables.
+ */
+export async function fetchEnvKeys(
+	config: Config,
+	options: FetchEnvOptions,
+	keys: readonly string[] | null,
+): Promise<ResolvedNeonEnv> {
 	const api = options.api ?? createApiFromOptions(options);
 	const projectId = options.projectId;
+	const { branch, desired } = await resolveBranchPolicy(config, options, api);
 
+	const selection = keys ? new Set<string>(keys) : null;
+	const wants = (key: string): boolean =>
+		selection === null || selection.has(key);
+
+	const result: ResolvedNeonEnv = {};
+	const [roles, databases] = await Promise.all([
+		api.listBranchRoles(projectId, branch.id),
+		api.listBranchDatabases(projectId, branch.id),
+	]);
+
+	const roleName = pickRoleName(roles, branch, options.roleName);
+	const databaseName = pickDatabaseName(
+		databases,
+		branch,
+		options.databaseName,
+	);
+
+	// Fan out: always fetch both Postgres URIs — the direct one also derives the AI Gateway
+	// host, so a selection that drops `DATABASE_URL_UNPOOLED` still needs it. Conditionally
+	// fetch auth + dataApi based on the branch policy and the selection. Auth key fields are
+	// only returned at integration creation time; for Better Auth they may legitimately be
+	// empty, so they can come back as empty strings.
+	const K = NEON_ENV_VAR_KEYS;
+	const wantsAuth =
+		desired.authEnabled && (wants(K.auth.baseUrl) || wants(K.auth.jwksUrl));
+	const wantsDataApi = desired.dataApiEnabled && wants(K.dataApi.url);
+
+	const [pooled, unpooled, authSnapshot, dataApiSnapshot] = await Promise.all(
+		[
+			api.getConnectionUri(projectId, {
+				branchId: branch.id,
+				databaseName,
+				roleName,
+				pooled: true,
+			}),
+			api.getConnectionUri(projectId, {
+				branchId: branch.id,
+				databaseName,
+				roleName,
+				pooled: false,
+			}),
+			wantsAuth
+				? api.getNeonAuth(projectId, branch.id)
+				: Promise.resolve(null),
+			wantsDataApi
+				? api.getNeonDataApi(projectId, branch.id, databaseName)
+				: Promise.resolve(null),
+		],
+	);
+
+	const postgres: Partial<NeonPostgresEnv> = {};
+	if (wants(K.postgres.databaseUrl)) postgres.databaseUrl = pooled.uri;
+	if (wants(K.postgres.databaseUrlUnpooled)) {
+		postgres.databaseUrlUnpooled = unpooled.uri;
+	}
+	if (Object.keys(postgres).length > 0) result.postgres = postgres;
+
+	// Branch identity, mirroring what the Functions runtime injects on every branch. Surfaced
+	// as `NEON_BRANCH` so local dev (`neon dev` / `neon-env run` / `env pull`) matches the
+	// deployed runtime. Uses the branch name.
+	if (wants(K.branch.name)) {
+		result.branch = { name: branch.name } satisfies NeonBranchEnv;
+	}
+
+	if (wantsAuth) {
+		if (!authSnapshot) {
+			throw new PlatformError(
+				ErrorCode.NotFound,
+				[
+					`fetchEnv: branch policy enables auth but no Neon Auth integration is enabled on branch ${branch.name} (${branch.id}).`,
+					"Enable it via `apply(config, { projectId, branchId })` (or `npx neonctl …`), in the Neon Console — then re-run fetchEnv. Or return auth.enabled=false.",
+				].join(" "),
+				{
+					details: { projectId, branchId: branch.id },
+				},
+			);
+		}
+		const auth: Partial<NeonAuthEnv> = {};
+		if (wants(K.auth.baseUrl)) auth.baseUrl = authSnapshot.baseUrl ?? "";
+		if (wants(K.auth.jwksUrl)) auth.jwksUrl = authSnapshot.jwksUrl ?? "";
+		result.auth = auth;
+	}
+
+	if (wantsDataApi) {
+		if (!dataApiSnapshot) {
+			throw new PlatformError(
+				ErrorCode.NotFound,
+				[
+					`fetchEnv: branch policy enables dataApi but no Data API integration is enabled on branch ${branch.name} (${branch.id}) database ${databaseName}.`,
+					"Enable it via `apply(config, { projectId, branchId })` or in the Neon Console — then re-run fetchEnv. Or return dataApi.enabled=false.",
+				].join(" "),
+				{
+					details: {
+						projectId,
+						branchId: branch.id,
+						databaseName,
+					},
+				},
+			);
+		}
+		result.dataApi = { url: dataApiSnapshot.url } satisfies NeonDataApiEnv;
+	}
+
+	// Object storage + AI Gateway (Preview). A single branch credential backs whichever of
+	// these the policy enables; functions never force one but ride along on its scopes. None
+	// of this runs when the policy enables neither, so the Postgres / Auth / Data API path
+	// never touches the credentials/storage endpoints (and keeps working on production, where
+	// they may not exist yet).
+	const storageEnabled = (desired.preview?.buckets.length ?? 0) > 0;
+	const gatewayEnabled = desired.preview?.aiGatewayEnabled ?? false;
+	const wantsStorage =
+		storageEnabled &&
+		(wants(K.storage.accessKeyId) ||
+			wants(K.storage.secretAccessKey) ||
+			wants(K.storage.endpoint) ||
+			wants(K.storage.region));
+	const wantsGateway =
+		gatewayEnabled &&
+		(wants(K.aiGateway.apiKey) || wants(K.aiGateway.baseUrl));
+	// A credential is minted only for its *secrets*. The endpoint, region and gateway host
+	// are plain branch metadata, so selecting only those touches no credential at all — which
+	// is how a caller holding valid secrets refreshes the rest without issuing a new one.
+	const wantsCredential =
+		(storageEnabled &&
+			(wants(K.storage.accessKeyId) ||
+				wants(K.storage.secretAccessKey))) ||
+		(gatewayEnabled && wants(K.aiGateway.apiKey));
+
+	if (wantsStorage || wantsGateway) {
+		// Read the branch's storage settings *before* minting: a policy that declares buckets
+		// on a branch without storage has to fail without having spent a credential on a
+		// resolve that cannot succeed.
+		let storage: NeonBranchStorageSnapshot | null = null;
+		if (wantsStorage) {
+			storage = await api.getProjectBranchStorage(projectId, branch.id);
+			if (!storage) {
+				throw new PlatformError(
+					ErrorCode.NotFound,
+					[
+						`fetchEnv: branch policy declares object storage (preview.buckets) but storage is not enabled on branch ${branch.name} (${branch.id}).`,
+						"Enable it via `apply(config, { projectId, branchId })` (or in the Neon Console) — then re-run fetchEnv. Or remove preview.buckets.",
+					].join(" "),
+					{ details: { projectId, branchId: branch.id } },
+				);
+			}
+		}
+
+		const secrets = wantsCredential
+			? await mintBranchCredential({
+					api,
+					projectId,
+					branchId: branch.id,
+					branchName: branch.name,
+					scopes: previewCredentialScopes(desired.preview),
+				})
+			: null;
+
+		if (storage) {
+			const storageEnv: Partial<NeonStorageEnv> = {};
+			if (secrets && wants(K.storage.accessKeyId)) {
+				storageEnv.accessKeyId = secrets.accessKeyId;
+			}
+			if (secrets && wants(K.storage.secretAccessKey)) {
+				storageEnv.secretAccessKey = secrets.secretAccessKey;
+			}
+			if (wants(K.storage.endpoint)) {
+				storageEnv.endpoint = storage.s3Endpoint;
+			}
+			if (wants(K.storage.region)) storageEnv.region = storage.region;
+			result.storage = storageEnv;
+		}
+		if (wantsGateway) {
+			const gateway: Partial<NeonAiGatewayEnv> = {};
+			if (secrets && wants(K.aiGateway.apiKey)) {
+				gateway.apiKey = secrets.apiToken;
+			}
+			if (wants(K.aiGateway.baseUrl)) {
+				// Bare branch-scoped gateway host derived from the branch's connection URI —
+				// not the control-plane API origin (which doesn't serve the gateway). Clients
+				// append the dialect route (/v1, /openai/v1, /anthropic/v1) themselves.
+				gateway.baseUrl = aiGatewayBaseUrl(branch.id, unpooled.uri);
+			}
+			result.aiGateway = gateway;
+		}
+	}
+
+	return result;
+}
+
+/**
+ * Resolve the target branch and evaluate the policy against it — the first thing any
+ * branch-scoped operation needs. Shared by {@link fetchEnv} and {@link fetchEnvReusingSecrets}
+ * so the two agree on which branch they're talking about and what it has enabled.
+ */
+export async function resolveBranchPolicy(
+	config: Config,
+	options: Pick<FetchEnvOptions, "projectId" | "branch" | "branchId">,
+	api: NeonApi,
+): Promise<{
+	branch: NeonBranchSnapshot;
+	desired: ReturnType<typeof resolveConfig>;
+}> {
+	const projectId = options.projectId;
 	const branches = await api.listBranches(projectId);
 	if (branches.length === 0) {
 		throw new PlatformError(
@@ -530,151 +784,7 @@ export async function fetchEnv<const C extends Config>(
 		isProtected: branch.protected,
 		...(branch.expiresAt ? { expiresAt: branch.expiresAt } : {}),
 	});
-
-	const [roles, databases] = await Promise.all([
-		api.listBranchRoles(projectId, branch.id),
-		api.listBranchDatabases(projectId, branch.id),
-	]);
-
-	const roleName = pickRoleName(roles, branch, options.roleName);
-	const databaseName = pickDatabaseName(
-		databases,
-		branch,
-		options.databaseName,
-	);
-
-	// Fan out: always fetch both Postgres URIs. Conditionally fetch auth + dataApi based
-	// on the branch policy. Auth key fields are only returned at integration creation time;
-	// for Better Auth they may legitimately be empty, so absence in the local env becomes
-	// empty string values while still emitting the required variable names.
-	const wantsAuth = desired.authEnabled;
-	const wantsDataApi = desired.dataApiEnabled;
-
-	const [pooled, unpooled, authSnapshot, dataApiSnapshot] = await Promise.all(
-		[
-			api.getConnectionUri(projectId, {
-				branchId: branch.id,
-				databaseName,
-				roleName,
-				pooled: true,
-			}),
-			api.getConnectionUri(projectId, {
-				branchId: branch.id,
-				databaseName,
-				roleName,
-				pooled: false,
-			}),
-			wantsAuth
-				? api.getNeonAuth(projectId, branch.id)
-				: Promise.resolve(null),
-			wantsDataApi
-				? api.getNeonDataApi(projectId, branch.id, databaseName)
-				: Promise.resolve(null),
-		],
-	);
-
-	const result: Record<string, unknown> = {
-		postgres: {
-			databaseUrl: pooled.uri,
-			databaseUrlUnpooled: unpooled.uri,
-		},
-		// Branch identity, mirroring what the Functions runtime injects on every branch.
-		// Surfaced as `NEON_BRANCH` so local dev (`neon dev` / `neon-env run` / `env pull`)
-		// matches the deployed runtime. Uses the branch name.
-		branch: { name: branch.name } satisfies NeonBranchEnv,
-	};
-
-	if (wantsAuth) {
-		if (!authSnapshot) {
-			throw new PlatformError(
-				ErrorCode.NotFound,
-				[
-					`fetchEnv: branch policy enables auth but no Neon Auth integration is enabled on branch ${branch.name} (${branch.id}).`,
-					"Enable it via `apply(config, { projectId, branchId })` (or `npx neonctl …`), in the Neon Console — then re-run fetchEnv. Or return auth.enabled=false.",
-				].join(" "),
-				{
-					details: { projectId, branchId: branch.id },
-				},
-			);
-		}
-		const envSource = options.env ?? process.env;
-		const baseUrl = resolveAuthBaseUrl(authSnapshot.baseUrl, envSource);
-		const jwksUrl = resolveAuthJwksUrl(authSnapshot.jwksUrl, envSource);
-		result.auth = { baseUrl, jwksUrl } satisfies NeonAuthEnv;
-	}
-
-	if (wantsDataApi) {
-		if (!dataApiSnapshot) {
-			throw new PlatformError(
-				ErrorCode.NotFound,
-				[
-					`fetchEnv: branch policy enables dataApi but no Data API integration is enabled on branch ${branch.name} (${branch.id}) database ${databaseName}.`,
-					"Enable it via `apply(config, { projectId, branchId })` or in the Neon Console — then re-run fetchEnv. Or return dataApi.enabled=false.",
-				].join(" "),
-				{
-					details: {
-						projectId,
-						branchId: branch.id,
-						databaseName,
-					},
-				},
-			);
-		}
-		result.dataApi = { url: dataApiSnapshot.url } satisfies NeonDataApiEnv;
-	}
-
-	// Object storage + AI Gateway (Preview). A single branch credential is minted (once) to
-	// back whichever of these the policy enables; functions never force a credential but ride
-	// along on its scopes. None of this runs when the policy enables neither, so the
-	// Postgres / Auth / Data API path never touches the credentials/storage endpoints (and
-	// keeps working on production, where they may not exist yet).
-	const wantsStorage = (desired.preview?.buckets.length ?? 0) > 0;
-	const wantsAiGateway = desired.preview?.aiGatewayEnabled ?? false;
-	if (wantsStorage || wantsAiGateway) {
-		const secrets = await resolveCredentialSecrets({
-			api,
-			projectId,
-			branchId: branch.id,
-			branchName: branch.name,
-			scopes: previewCredentialScopes(desired.preview),
-			env: options.env ?? process.env,
-			needStorage: wantsStorage,
-			needApiToken: wantsAiGateway,
-		});
-		if (wantsStorage) {
-			const storage = await api.getProjectBranchStorage(
-				projectId,
-				branch.id,
-			);
-			if (!storage) {
-				throw new PlatformError(
-					ErrorCode.NotFound,
-					[
-						`fetchEnv: branch policy declares object storage (preview.buckets) but storage is not enabled on branch ${branch.name} (${branch.id}).`,
-						"Enable it via `apply(config, { projectId, branchId })` (or in the Neon Console) — then re-run fetchEnv. Or remove preview.buckets.",
-					].join(" "),
-					{ details: { projectId, branchId: branch.id } },
-				);
-			}
-			result.storage = {
-				accessKeyId: secrets.accessKeyId,
-				secretAccessKey: secrets.secretAccessKey,
-				endpoint: storage.s3Endpoint,
-				region: storage.region,
-			} satisfies NeonStorageEnv;
-		}
-		if (wantsAiGateway) {
-			result.aiGateway = {
-				apiKey: secrets.apiToken,
-				// Bare branch-scoped gateway host derived from the branch's connection URI —
-				// not the control-plane API origin (which doesn't serve the gateway). Clients
-				// append the dialect route (/v1, /openai/v1, /anthropic/v1) themselves.
-				baseUrl: aiGatewayBaseUrl(branch.id, unpooled.uri),
-			} satisfies NeonAiGatewayEnv;
-		}
-	}
-
-	return result as NeonEnv<C>;
+	return { branch, desired };
 }
 
 /**
@@ -684,7 +794,7 @@ export async function fetchEnv<const C extends Config>(
  * being minted for storage / the AI Gateway, so the one credential can invoke the branch's
  * functions too. Returns `[]` only when nothing credential-bearing is enabled.
  */
-function previewCredentialScopes(
+export function previewCredentialScopes(
 	preview: ResolvedPreviewConfig | undefined,
 ): CredentialScope[] {
 	if (!preview) return [];
@@ -698,49 +808,83 @@ function previewCredentialScopes(
 	});
 }
 
+/** The `name` this tool stamps on every credential it mints, so it can recognize its own. */
+export function credentialName(branchName: string): string {
+	return `neon-env ${branchName}`;
+}
+
+/** The env-var keys a branch credential's secrets surface under, in emit order. */
+export function credentialEnvKeys(flags: {
+	storage: boolean;
+	aiGateway: boolean;
+}): string[] {
+	return [
+		...(flags.storage
+			? [
+					NEON_ENV_VAR_KEYS.storage.accessKeyId,
+					NEON_ENV_VAR_KEYS.storage.secretAccessKey,
+				]
+			: []),
+		...(flags.aiGateway ? [NEON_ENV_VAR_KEYS.aiGateway.apiKey] : []),
+	];
+}
+
 /**
- * Resolve the branch credential's secrets, reusing the ones already in the env source when
- * present and minting a fresh `user` credential otherwise. The Neon API returns `api_token` /
- * `s3_secret_access_key` exactly once at mint time, so the persisted copies (e.g. in
- * `.env.local`, surfaced as `NEON_AI_GATEWAY_TOKEN` / `AWS_SECRET_ACCESS_KEY`) are the only way to
- * recover them — exactly how one-time Auth keys are round-tripped. Reuse is presence-based
- * (no extra bookkeeping vars): if every secret the enabled features need is already present,
- * reuse it; otherwise mint one credential covering all currently-needed scopes.
+ * Every OS-level env var a resolved branch policy produces, in emit order. Lets a caller
+ * subtract the ones it already holds and pass the rest as {@link fetchEnv}'s `keys`, without
+ * re-deriving which vars a policy implies.
  */
-async function resolveCredentialSecrets(args: {
+export function policyEnvKeys(
+	desired: ReturnType<typeof resolveConfig>,
+): string[] {
+	const K = NEON_ENV_VAR_KEYS;
+	return [
+		K.postgres.databaseUrl,
+		K.postgres.databaseUrlUnpooled,
+		K.branch.name,
+		...(desired.authEnabled ? [K.auth.baseUrl, K.auth.jwksUrl] : []),
+		...(desired.dataApiEnabled ? [K.dataApi.url] : []),
+		...((desired.preview?.buckets.length ?? 0) > 0
+			? [
+					K.storage.accessKeyId,
+					K.storage.secretAccessKey,
+					K.storage.endpoint,
+					K.storage.region,
+				]
+			: []),
+		...(desired.preview?.aiGatewayEnabled
+			? [K.aiGateway.apiKey, K.aiGateway.baseUrl]
+			: []),
+	];
+}
+
+/**
+ * Mint the branch credential backing object storage / the AI Gateway.
+ *
+ * `api_token` and `s3_secret_access_key` come back **exactly once** — they are not stored
+ * server-side and the list endpoint returns metadata only — so the caller's copy is the only
+ * copy. That is why {@link fetchEnv} mints rather than fetches: there is nothing to fetch. A
+ * caller that already holds a valid copy should leave the secret keys out of `keys` (see
+ * {@link fetchEnvReusingSecrets}) instead of minting one it will discard.
+ */
+async function mintBranchCredential(args: {
 	api: NeonApi;
 	projectId: string;
 	branchId: string;
 	branchName: string;
 	scopes: CredentialScope[];
-	env: NodeJS.ProcessEnv;
-	needStorage: boolean;
-	needApiToken: boolean;
 }): Promise<{
 	accessKeyId: string;
 	secretAccessKey: string;
 	apiToken: string;
 }> {
-	const sKeys = NEON_ENV_VAR_KEYS.storage;
-	const aKeys = NEON_ENV_VAR_KEYS.aiGateway;
-	const haveStorage =
-		!args.needStorage ||
-		Boolean(args.env[sKeys.accessKeyId] && args.env[sKeys.secretAccessKey]);
-	const haveApiToken = !args.needApiToken || Boolean(args.env[aKeys.apiKey]);
-	if (haveStorage && haveApiToken) {
-		return {
-			accessKeyId: args.env[sKeys.accessKeyId] ?? "",
-			secretAccessKey: args.env[sKeys.secretAccessKey] ?? "",
-			apiToken: args.env[aKeys.apiKey] ?? "",
-		};
-	}
 	const minted = await args.api.createCredential(
 		args.projectId,
 		args.branchId,
 		{
 			scopes: args.scopes,
 			principalType: "user",
-			name: `neon-env ${args.branchName}`,
+			name: credentialName(args.branchName),
 		},
 	);
 	return {
@@ -781,34 +925,7 @@ function aiGatewayBaseUrl(branchId: string, connectionUri: string): string {
 	return `https://${aiGatewayHost(branchId, connectionUri)}`;
 }
 
-/**
- * Resolve the Neon Auth base URL to surface in `env.auth`. Prefer the value returned by
- * the integration (`getNeonAuth` includes it); fall back to whatever is already in the
- * caller's env source so older integrations created before `base_url` was returned still
- * round-trip through `env run`.
- */
-function resolveAuthBaseUrl(
-	snapshotBaseUrl: string | undefined,
-	source: NodeJS.ProcessEnv,
-): string {
-	if (snapshotBaseUrl && snapshotBaseUrl !== "") return snapshotBaseUrl;
-	return source[NEON_ENV_VAR_KEYS.auth.baseUrl] ?? "";
-}
-
-/**
- * Resolve the Neon Auth JWKS URL to surface in `env.auth`. Prefer the value returned by the
- * integration (`getNeonAuth` always includes `jwks_url`); fall back to the caller's env
- * source so the value still round-trips through `env run` if a snapshot ever omits it.
- */
-function resolveAuthJwksUrl(
-	snapshotJwksUrl: string | undefined,
-	source: NodeJS.ProcessEnv,
-): string {
-	if (snapshotJwksUrl && snapshotJwksUrl !== "") return snapshotJwksUrl;
-	return source[NEON_ENV_VAR_KEYS.auth.jwksUrl] ?? "";
-}
-
-function createApiFromOptions(options: FetchEnvOptions): NeonApi {
+export function createApiFromOptions(options: FetchEnvOptions): NeonApi {
 	return createNeonApiFromOptions("fetchEnv", {
 		...(options.apiKey ? { apiKey: options.apiKey } : {}),
 		...(options.apiHost ? { apiHost: options.apiHost } : {}),
@@ -1268,6 +1385,7 @@ export function parseEnv(
 const FILTERABLE_ENV_KEYS: Record<string, readonly [string, string]> = {
 	DATABASE_URL: ["postgres", "databaseUrl"],
 	DATABASE_URL_UNPOOLED: ["postgres", "databaseUrlUnpooled"],
+	NEON_BRANCH: ["branch", "name"],
 	NEON_AUTH_BASE_URL: ["auth", "baseUrl"],
 	NEON_AUTH_JWKS_URL: ["auth", "jwksUrl"],
 	NEON_DATA_API_URL: ["dataApi", "url"],
@@ -1343,42 +1461,36 @@ function parseFilteredEnv(
  * Walks the value at runtime so it works for any `NeonEnv<C>` regardless of which
  * conditional namespaces are present.
  */
-export function toEntries(env: NeonEnv<Config>): Record<string, string> {
-	const out: Record<string, string> = {
-		[NEON_ENV_VAR_KEYS.postgres.databaseUrl]: env.postgres.databaseUrl,
-		[NEON_ENV_VAR_KEYS.postgres.databaseUrlUnpooled]:
-			env.postgres.databaseUrlUnpooled,
+export function toEntries(env: ResolvedNeonEnv): Record<string, string> {
+	const out: Record<string, string> = {};
+	const put = (key: string, value: string | undefined): void => {
+		if (value !== undefined) out[key] = value;
 	};
-	if (env.branch) {
-		out[NEON_ENV_VAR_KEYS.branch.name] = env.branch.name;
-	}
-	const withAuth = env as { auth?: NeonAuthEnv };
-	if (withAuth.auth) {
-		out[NEON_ENV_VAR_KEYS.auth.baseUrl] = withAuth.auth.baseUrl;
-		out[NEON_ENV_VAR_KEYS.auth.jwksUrl] = withAuth.auth.jwksUrl;
-	}
-	const withDataApi = env as { dataApi?: NeonDataApiEnv };
-	if (withDataApi.dataApi) {
-		out[NEON_ENV_VAR_KEYS.dataApi.url] = withDataApi.dataApi.url;
-	}
-	const withStorage = env as { storage?: NeonStorageEnv };
-	if (withStorage.storage) {
-		const s = withStorage.storage;
-		const keys = NEON_ENV_VAR_KEYS.storage;
-		out[keys.accessKeyId] = s.accessKeyId;
-		out[keys.secretAccessKey] = s.secretAccessKey;
-		out[keys.endpoint] = s.endpoint;
-		out[keys.region] = s.region;
-	}
-	const withAiGateway = env as { aiGateway?: NeonAiGatewayEnv };
-	if (withAiGateway.aiGateway) {
-		const keys = NEON_ENV_VAR_KEYS.aiGateway;
-		const ai = withAiGateway.aiGateway;
-		// Neon-branded vars only: the bearer and the bare branch gateway host
-		// (scheme://host, no path) — the @neon/ai-sdk-provider appends the
-		// dialect route (/v1, /openai/v1, /anthropic/v1) itself (https://github.com/vercel/ai/pull/15997).
-		out[keys.apiKey] = ai.apiKey;
-		out[keys.baseUrl] = ai.baseUrl;
-	}
+	const K = NEON_ENV_VAR_KEYS;
+	put(K.postgres.databaseUrl, env.postgres?.databaseUrl);
+	put(K.postgres.databaseUrlUnpooled, env.postgres?.databaseUrlUnpooled);
+	put(K.branch.name, env.branch?.name);
+	put(K.auth.baseUrl, env.auth?.baseUrl);
+	put(K.auth.jwksUrl, env.auth?.jwksUrl);
+	put(K.dataApi.url, env.dataApi?.url);
+	put(K.storage.accessKeyId, env.storage?.accessKeyId);
+	put(K.storage.secretAccessKey, env.storage?.secretAccessKey);
+	put(K.storage.endpoint, env.storage?.endpoint);
+	put(K.storage.region, env.storage?.region);
+	// Neon-branded gateway vars only: the bearer and the bare branch gateway host
+	// (scheme://host, no path) — the @neon/ai-sdk-provider appends the dialect route
+	// (/v1, /openai/v1, /anthropic/v1) itself (https://github.com/vercel/ai/pull/15997).
+	put(K.aiGateway.apiKey, env.aiGateway?.apiKey);
+	put(K.aiGateway.baseUrl, env.aiGateway?.baseUrl);
 	return out;
 }
+
+/**
+ * Any resolved env {@link toEntries} can project: a full {@link NeonEnv}, or the narrowed
+ * result of a `keys`-filtered {@link fetchEnv} / {@link parseEnv} call. Every namespace and
+ * property is optional so a filtered result — which legitimately carries only what was asked
+ * for — projects to exactly the vars it holds instead of failing to type-check.
+ */
+export type ResolvedNeonEnv = {
+	[N in keyof NamespaceEnv]?: Partial<NamespaceEnv[N]>;
+};
