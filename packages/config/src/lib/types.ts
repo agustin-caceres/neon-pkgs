@@ -335,6 +335,42 @@ export interface FunctionDef {
 	 */
 	env?: Record<string, string>;
 	/**
+	 * Packages the bundler must leave alone, by name — the deploy-time equivalent of
+	 * Next.js's `serverExternalPackages`. Every entry is passed to esbuild's `external`,
+	 * so the import survives into the bundle instead of being followed.
+	 *
+	 * Reach for this when bundling a package is impossible rather than merely undesirable.
+	 * The cases that come up: a native `.node` addon or a `node-gyp` dependency esbuild has
+	 * no loader for, and an optional peer dependency a library references on a code path
+	 * this function never takes. Both fail the deploy at bundle time with a resolve or
+	 * loader error naming the package, and neither is fixable from the function's own
+	 * source.
+	 *
+	 * **An external package is not resolvable at runtime.** The deployed archive is a
+	 * single `index.mjs` with no `node_modules` beside it, so anything listed here throws
+	 * `Cannot find module` if the function actually reaches it. This option therefore only
+	 * unblocks an import that is never evaluated; it does not make a dependency usable.
+	 *
+	 * A dependency the handler actually calls has to be bundled, and whether that is
+	 * possible depends on what it is. A pure-JavaScript package can be bundled, and a
+	 * failure to do so is usually something specific and fixable. A package backed by a
+	 * native `.node` binary cannot be bundled by anything — the binary is a compiled
+	 * object the platform loads from a real path — so such a package cannot work on
+	 * Functions until the deployed archive can carry files alongside the bundle. Do not
+	 * reach for `externalPackages` to try: it moves the error from deploy to invoke.
+	 *
+	 * Note that a native package may bundle without ever needing this option. `sharp`, for
+	 * instance, loads its binary through `createRequire`, which esbuild does not follow, so
+	 * it bundles cleanly and then fails at invoke with "Could not load the sharp module".
+	 *
+	 * Entries are package names, optionally with a subpath (`pkg`, `@scope/pkg`,
+	 * `pkg/sub`), matching esbuild. A relative or absolute path is rejected at validation
+	 * time: those are local modules, and a local module that cannot be bundled is a
+	 * different problem.
+	 * @example ["microsandbox", "@mongodb-js/zstd"]
+	 */
+	externalPackages?: string[];
+	/**
 	 * Local-development settings used by `neon dev` when serving every function from
 	 * `neon.ts`. Ignored at deploy time. See {@link FunctionDevConfig}.
 	 */
@@ -515,6 +551,12 @@ export interface ResolvedFunctionConfig {
 	name: string;
 	source: string;
 	env: Record<string, string>;
+	/**
+	 * Packages the bundler leaves unresolved, passed through from
+	 * {@link FunctionDef.externalPackages}. Absent rather than empty when undeclared, so a
+	 * policy that never mentions it resolves to the same shape it always did.
+	 */
+	externalPackages?: string[];
 	runtime: FunctionRuntime;
 	/**
 	 * Local-development settings, passed through untouched from {@link FunctionDef.dev}
