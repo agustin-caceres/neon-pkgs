@@ -16,13 +16,24 @@ import type {
 	Snapshot,
 } from "../../client/types.gen.js";
 import type { CallOptions, RequestContext } from "../context.js";
+import { NeonAbortError } from "../errors.js";
 import { err, finalize, type NeonResult, type Outcome, ok } from "../result.js";
 
 /**
  * Inspect a freshly restored (not-yet-finalized) branch and decide whether to commit.
  * Return `true` to finalize the restore, `false` to abort it.
  */
-export type RestorePreview = (branch: Branch) => boolean | Promise<boolean>;
+/**
+ * Inspect a restored-but-un-finalized branch and decide whether to commit it.
+ *
+ * The second argument carries the call's `signal`. The SDK cannot interrupt this callback
+ * — it is the caller's own code — so long-running checks should honour the signal
+ * themselves; the restore is left un-finalized if the call is cancelled around it.
+ */
+export type RestorePreview = (
+	branch: Branch,
+	context: { signal?: AbortSignal },
+) => boolean | Promise<boolean>;
 
 /** Options for {@link Snapshots.create} (point-in-time + naming). */
 export interface CreateSnapshotInput {
@@ -115,11 +126,12 @@ export class Snapshots<DThrow extends boolean> {
 	): Promise<Snapshot[] | NeonResult<Snapshot[]>> {
 		return this.#ctx.run(
 			opts,
-			(client) =>
+			(client, signal) =>
 				listSnapshots({
 					client,
 					path: { project_id: projectId },
 					throwOnError: false,
+					signal,
 				}),
 			(data) => data.snapshots,
 		);
@@ -145,7 +157,7 @@ export class Snapshots<DThrow extends boolean> {
 	): Promise<Snapshot | NeonResult<Snapshot>> {
 		return this.#ctx.run(
 			opts,
-			(client) =>
+			(client, signal) =>
 				createSnapshot({
 					client,
 					path: { project_id: projectId, branch_id: branchId },
@@ -156,6 +168,7 @@ export class Snapshots<DThrow extends boolean> {
 						expires_at: input?.expiresAt,
 					},
 					throwOnError: false,
+					signal,
 				}),
 			(data) => data.snapshot,
 		);
@@ -181,7 +194,7 @@ export class Snapshots<DThrow extends boolean> {
 	): Promise<Snapshot | NeonResult<Snapshot>> {
 		return this.#ctx.run(
 			opts,
-			(client) =>
+			(client, signal) =>
 				updateSnapshot({
 					client,
 					path: { project_id: projectId, snapshot_id: snapshotId },
@@ -195,6 +208,7 @@ export class Snapshots<DThrow extends boolean> {
 						},
 					},
 					throwOnError: false,
+					signal,
 				}),
 			(data) => data.snapshot,
 		);
@@ -217,11 +231,12 @@ export class Snapshots<DThrow extends boolean> {
 	): Promise<void | NeonResult<void>> {
 		return this.#ctx.run(
 			opts,
-			(client) =>
+			(client, signal) =>
 				deleteSnapshot({
 					client,
 					path: { project_id: projectId, snapshot_id: snapshotId },
 					throwOnError: false,
+					signal,
 				}),
 			() => undefined,
 		);
@@ -272,7 +287,7 @@ export class Snapshots<DThrow extends boolean> {
 				...opts,
 				waitForReadiness: preview ? true : opts?.waitForReadiness,
 			},
-			(client) =>
+			(client, signal) =>
 				restoreSnapshot({
 					client,
 					path: { project_id: projectId, snapshot_id: snapshotId },
@@ -282,6 +297,7 @@ export class Snapshots<DThrow extends boolean> {
 						finalize_restore: finalizeNow,
 					},
 					throwOnError: false,
+					signal,
 				}),
 			(data) => data.branch,
 		);
@@ -290,11 +306,35 @@ export class Snapshots<DThrow extends boolean> {
 		}
 
 		const branch = restored.data;
-		const commit = await preview(branch);
+		// The callback is the caller's own code, so the SDK cannot bound it — a callback
+		// that never settles leaves the restore un-finalized however the signal is set.
+		// It gets the signal so it can cooperate, and the abort is honoured either side
+		// of it rather than pretending to interrupt it.
+		if (opts?.signal?.aborted) {
+			return finalize(
+				err<Branch>(
+					new NeonAbortError(
+						"The restore was aborted before its preview callback ran; the restored branch is left un-finalized.",
+					),
+				),
+				shouldThrow,
+			);
+		}
+		const commit = await preview(branch, { signal: opts?.signal });
+		if (opts?.signal?.aborted) {
+			return finalize(
+				err<Branch>(
+					new NeonAbortError(
+						"The restore was aborted after its preview callback ran; the restored branch is left un-finalized.",
+					),
+				),
+				shouldThrow,
+			);
+		}
 		const step = commit
 			? await this.#ctx.execute(
 					{ ...opts, waitForReadiness: true },
-					(client) =>
+					(client, signal) =>
 						finalizeRestoreBranch({
 							client,
 							path: {
@@ -302,6 +342,7 @@ export class Snapshots<DThrow extends boolean> {
 								branch_id: branch.id,
 							},
 							throwOnError: false,
+							signal,
 						}),
 					() => undefined,
 				)
@@ -309,7 +350,7 @@ export class Snapshots<DThrow extends boolean> {
 				? ok(undefined)
 				: await this.#ctx.execute(
 						{ ...opts, waitForReadiness: true },
-						(client) =>
+						(client, signal) =>
 							deleteProjectBranch({
 								client,
 								path: {
@@ -317,6 +358,7 @@ export class Snapshots<DThrow extends boolean> {
 									branch_id: branch.id,
 								},
 								throwOnError: false,
+								signal,
 							}),
 						() => undefined,
 					);
@@ -342,11 +384,12 @@ export class Snapshots<DThrow extends boolean> {
 	): Promise<BackupSchedule | NeonResult<BackupSchedule>> {
 		return this.#ctx.run(
 			opts,
-			(client) =>
+			(client, signal) =>
 				getSnapshotSchedule({
 					client,
 					path: { project_id: projectId, branch_id: branchId },
 					throwOnError: false,
+					signal,
 				}),
 			(data) => data,
 		);
@@ -382,12 +425,13 @@ export class Snapshots<DThrow extends boolean> {
 	): Promise<void | NeonResult<void>> {
 		return this.#ctx.run(
 			opts,
-			(client) =>
+			(client, signal) =>
 				setSnapshotSchedule({
 					client,
 					path: { project_id: projectId, branch_id: branchId },
 					body: schedule,
 					throwOnError: false,
+					signal,
 				}),
 			() => undefined,
 		);

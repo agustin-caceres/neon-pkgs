@@ -1,5 +1,6 @@
 import { createClient, createConfig } from "../client/client/index.js";
 import type { ResolvedConfig } from "./context.js";
+import { resolveTimeoutMs } from "./deadline.js";
 import type { WaitForOptions } from "./wait.js";
 
 const DEFAULT_BASE_URL = "https://console.neon.tech/api/v2";
@@ -26,6 +27,19 @@ export interface NeonConfig<Throw extends boolean = false> {
 	wait?: WaitForOptions;
 	/** Number of automatic retries on always-safe statuses (423/429/503). Default 2. */
 	retries?: number;
+	/**
+	 * Deadline in milliseconds for a single request **and** its retries, after which the
+	 * call resolves with a `NeonTimeoutError` and the request is aborted. Overridable per
+	 * call.
+	 *
+	 * Unset by default: calls are unbounded, as they have always been. Set it to bound
+	 * them, and pass `Infinity` on a call that needs to opt back out of a client-wide
+	 * value — a large `storage.objects.get` download or a `functions.deploy` upload, say.
+	 *
+	 * Separate from `wait.timeoutMs`, which budgets readiness polling rather than a
+	 * request.
+	 */
+	requestTimeoutMs?: number;
 	/** Override the API base URL. Defaults to `https://console.neon.tech/api/v2`. */
 	baseUrl?: string;
 	/** Custom `fetch` implementation (e.g. for proxies, tests, or non-global runtimes). */
@@ -53,6 +67,7 @@ export function resolveConfig(config: NeonConfig<boolean>): ResolvedConfig {
 		client,
 		throwOnError: config.throwOnError ?? false,
 		retries: config.retries ?? 2,
+		requestTimeoutMs: resolveTimeoutMs(config.requestTimeoutMs),
 		waitForReadiness: config.waitForReadiness ?? false,
 		waitOptions: config.wait ?? {},
 		orgId: config.orgId,
