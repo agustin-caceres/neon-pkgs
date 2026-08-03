@@ -2,9 +2,9 @@
 
 Community [Vercel AI SDK](https://ai-sdk.dev) provider for the [Neon](https://neon.com) AI Gateway. Supports **AI SDK v6 and v7** (`ai@^6` or `ai@^7`).
 
-The Neon AI Gateway is **branch-scoped**: each Neon project branch gets its own gateway host, and a platform token authorizes requests for that branch. This provider routes each model to the best gateway endpoint (Anthropic → native Messages, OpenAI → native Responses incl. **Codex**, everything else → unified OpenAI-compatible MLflow endpoint), so a single `neon('claude-...')` call reaches the whole catalog.
+The Neon AI Gateway is **branch-scoped**: each Neon project branch gets its own gateway host, and a platform token authorizes requests for that branch. Use the same `neon(modelId)` API across the branch's model catalog; the provider selects Anthropic Messages, OpenAI Responses, or Chat Completions for each model.
 
-Model ids use the canonical Neon (unprefixed) form — `claude-sonnet-4-6`, `gpt-5`, `gemini-2-5-flash` — matching the [`neon` provider on models.dev](https://models.dev). The typed catalog mirrors that provider exactly (kept in sync by a scheduled drift check), plus a few extra gateway-served ids that models.dev doesn't list yet (e.g. Codex, Llama, Qwen). Any other id — including the legacy `databricks-` prefixed form (`databricks-claude-sonnet-4-6`) — is still accepted as a plain string, so existing code keeps working.
+Use canonical model ids such as `gpt-5-mini`, `llama-4-maverick`, and `gemini-3-flash`, matching the [`neon` provider on models.dev](https://models.dev). The typed catalog includes the known model ids, and arbitrary strings are accepted so newly available models work before the types update.
 
 ## Install
 
@@ -31,7 +31,7 @@ import { generateText } from "ai";
 
 // Reads NEON_AI_GATEWAY_BASE_URL + NEON_AI_GATEWAY_TOKEN from the environment.
 const { text } = await generateText({
-  model: neon("claude-haiku-4-5"), // or 'gpt-5-3-codex', etc.
+  model: neon("gpt-5-mini"), // or "llama-4-maverick", "gemini-3-flash", …
   prompt: "Summarize Postgres for me.",
 });
 ```
@@ -51,17 +51,19 @@ const neon = createNeon({
 
 | Model family | Endpoint | Why |
 | --- | --- | --- |
-| Anthropic (`claude-*`) | native Messages API | streaming structured output + native reasoning |
-| OpenAI (`gpt-*`, `*-codex`) | native Responses API | Codex (native-only), native reasoning, image-gen tool |
-| Everything else (Gemini, Llama, Qwen, gpt-oss, ...) | unified MLflow endpoint | broad coverage; Gemini is here because its native endpoint does not support streaming |
+| Anthropic (`claude-*`) | Messages API | Anthropic tools, structured output, and reasoning |
+| OpenAI (`gpt-*`, `*-codex`) | Responses API | Codex, reasoning, and built-in tools such as image generation |
+| Everything else (Gemini, Llama, Qwen, gpt-oss, ...) | Chat Completions API | one streaming interface across the remaining model families |
 
-Routing matches on the model id, so both the canonical (`gpt-5`) and the legacy `databricks-`-prefixed (`databricks-gpt-5`) forms route identically.
+Routing matches on the model id.
 
 ## Capabilities
 
-Verified across Anthropic, OpenAI (incl. Codex), Google, and Meta models: `generateText` / `streamText` (text, system prompts, multi-turn), tool calling (single and multi-step, generate and stream), `generateObject` / `streamObject`, and image (vision) input.
+`generateText` and `streamText` work with any model available to your branch. `generateObject`, `streamObject`, and single- or multi-step tool calls work with OpenAI (including Codex), Meta, and Alibaba models. Gemini currently supports `generateText` and `streamText`; structured output and multi-step tools are not supported. Vision input works on models that accept images.
 
-For MLflow-routed models, the provider detects the model family and drops parameters a backend rejects (e.g. penalties/`seed` for Llama, `reasoningEffort` for Gemini) with an AI SDK warning (`result.warnings`) instead of failing the request.
+Claude models use the Messages API when `claude-*` ids are available. For models using Chat Completions, the provider removes unsupported options such as penalties or `seed` for Llama and `reasoningEffort` for Gemini, then reports them in `result.warnings` instead of failing the request. Unsupported Responses API storage options throw before a request is sent — see [Errors](#errors).
+
+Which ids your branch serves is account-specific during the beta; `GET $NEON_AI_GATEWAY_BASE_URL/v1/models` is the authoritative list.
 
 ## Image generation
 
@@ -85,11 +87,90 @@ for await (const part of result.fullStream) {
 }
 ```
 
+### Edit a generated image
+
+The gateway does not support stored Responses API items (`store: true`, `previousResponseId`, or `conversation`), which the Responses API uses to reuse tool results across turns. For image edits, pass the returned bytes back as image input; otherwise the model does not receive the original image and generates a new one.
+
+```ts
+const first = await generateText({
+  model: neon("gpt-5-mini"),
+  prompt: "Generate an image of a plain red square.",
+  tools: { image_generation: neon.tools.imageGeneration({ outputFormat: "jpeg" }) },
+});
+
+const generated = first.steps
+  .flatMap((step) => step.toolResults)
+  .find((result) => result.toolName === "image_generation");
+const output = generated?.output;
+if (
+  !output ||
+  typeof output !== "object" ||
+  !("result" in output) ||
+  typeof output.result !== "string"
+) {
+  throw new Error("Image generation did not return image bytes.");
+}
+
+// Pass it back as image content, not as conversation history.
+await generateText({
+  model: neon("gpt-5-mini"),
+  tools: { image_generation: neon.tools.imageGeneration({ outputFormat: "jpeg" }) },
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "image", image: output.result, mediaType: "image/jpeg" },
+        { type: "text", text: "Make that same square blue instead." },
+      ],
+    },
+  ],
+});
+```
+
+The same stateless limitation applies to other built-in Responses tools such as web search and code interpreter.
+
+## Errors
+
+A failed call rejects with the AI SDK's `APICallError`, and `error.message` carries the gateway's own reason rather than the bare HTTP status line:
+
+```ts
+import { APICallError, generateText } from "ai";
+
+try {
+  await generateText({ model: neon("gpt-5-mini"), maxOutputTokens: 1, prompt });
+} catch (error) {
+  if (APICallError.isInstance(error)) {
+    error.message;      // "Invalid 'max_output_tokens': integer below minimum
+                        //  value. Expected a value >= 16, but got 1 instead."
+    error.responseBody; // the gateway's original body, including its error_code
+  }
+}
+```
+
+The provider normalizes JSON error responses so the gateway's reason lands on `error.message`. Errors delivered inside an open stream and non-JSON responses keep the HTTP status line; inspect `error.responseBody` for their payload.
+
+Requests that cannot work are refused before they leave, with `UnsupportedFunctionalityError`:
+
+| `providerOptions.openai` | Why |
+| --- | --- |
+| `store: true` or `store: null` | The Responses route is stateless and never persists items. `null` is not "omitted" — the AI SDK reads it as `true`. |
+| `previousResponseId`, `conversation` | Nothing is stored for them to refer to. Send the full message history instead. |
+
+Provider options are namespaced per route, which decides where the SDK reads them from:
+
+| Route | Models | Namespace |
+| --- | --- | --- |
+| Responses | `gpt-*` (incl. Codex) | `openai` |
+| Chat Completions | Gemini, Llama, Qwen, gpt-oss, … | `neon` |
+| Anthropic Messages | `claude-*` | `anthropic` |
+
+So `store` is only refused on the Responses route; the same option is ignored elsewhere.
+
 ## Limitations
 
-- `generateImage()` and embeddings (`embed` / `embedMany`) are not offered by the gateway and throw `NoSuchModelError`.
-- `gpt-oss-*` models return a non-standard ("harmony") response shape on the unified endpoint (`message.content` as an array of reasoning/text parts instead of a string). The provider normalizes this to the OpenAI Chat Completions contract (string `content` + `reasoning_content`) so `generateText`/`streamText` work and reasoning is surfaced. See neondatabase/neon-pkgs#308.
-- OpenAI Responses multi-turn tool flows (`generateText` + `stepCountIs`) can return 502 from the gateway; tool calling is covered on Anthropic/Google/Meta in e2e.
+- The gateway does not offer image or embedding model endpoints, so `generateImage()`, `embed()`, and `embedMany()` throw `NoSuchModelError`. Image generation is available through the Responses API's built-in `image_generation` tool with `neon.tools.imageGeneration()`.
+- Results from provider-executed tools (`neon.tools.imageGeneration`, and the other Responses built-ins) are not replayed to the gateway on a later step — see [Edit a generated image](#edit-a-generated-image).
+- The Responses route is stateless, so the provider sends `store: false` and refuses `store: true`, `store: null`, `previousResponseId`, or `conversation` — see [Errors](#errors).
 
 ## End-to-end tests
 
@@ -100,4 +181,4 @@ cp .env.example .env   # fill NEON_AI_GATEWAY_BASE_URL + NEON_AI_GATEWAY_TOKEN f
 pnpm test:e2e
 ```
 
-The matrix covers one models.dev `neon` model per family (Anthropic, OpenAI, Codex, Gemini, Meta) across `generateText`, `streamText`, `generateObject`, tool calling, and `neon.tools.imageGeneration`. It also fetches the live `/v1/models` catalog and calls every currently enabled model with both AI SDK 6 and AI SDK 7. Tests are skipped when gateway env vars are absent.
+The matrix covers one models.dev `neon` model per family (Anthropic, OpenAI, Codex, Gemini, Meta, Alibaba) across `generateText`, `streamText`, `generateObject`, tool calling, and `neon.tools.imageGeneration`. `generateObject` and tool calling run on the subset of families where they are verified (see [Capabilities](#capabilities)); a family whose representative id the branch does not serve is skipped rather than failed. It also fetches the live `/v1/models` catalog and calls every currently enabled model with both AI SDK 6 and AI SDK 7. Tests are skipped when gateway env vars are absent.

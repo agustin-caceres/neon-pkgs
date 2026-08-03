@@ -11,11 +11,12 @@ import { neon } from "../src/index.js";
 import {
 	assertGatewayEnv,
 	expectNoHardFailureWarnings,
+	fetchServedModelIds,
 	hasGatewayEnv,
 	MATRIX_MODELS,
 	type MatrixFamily,
 	maxTokensFor,
-	REASONING_FAMILIES,
+	REASONING_EFFORT_FAMILIES,
 } from "./helpers.js";
 
 const PROMPT = "Reply with exactly three words.";
@@ -32,20 +33,42 @@ const weatherTool = tool({
 	execute: async ({ city }) => ({ city, tempF: 72 }),
 });
 
-/** Families where structured output is expected to work end-to-end. */
+/**
+ * Families where structured output is expected to work end-to-end.
+ *
+ * Gemini is excluded: on the unified endpoint it answers `generateObject` with
+ * prose the SDK cannot parse into the schema ("No object generated"), measured
+ * on both `gemini-3-flash` and `gemini-3-5-flash`.
+ */
 const STRUCTURED_FAMILIES = new Set<MatrixFamily>([
 	"anthropic",
 	"openai",
-	"google",
+	"codex",
 	"meta",
+	"alibaba",
 ]);
 
-/** Families where multi-step tool calling is exercised (OpenAI Responses multi-turn tools can 502 on the gateway). */
-const TOOL_FAMILIES = new Set<MatrixFamily>(["anthropic", "google", "meta"]);
+/**
+ * Families where multi-step tool calling is exercised.
+ *
+ * OpenAI and Codex matter most here: their Responses tool loop is the one that
+ * breaks if the SDK ever replays reasoning as an `item_reference` the stateless
+ * gateway cannot resolve, which the gateway answers with a 502.
+ *
+ * Gemini is excluded: the tool round trip 400s on the replay leg, since the AI
+ * SDK does not echo back the `thoughtSignature` Gemini expects.
+ */
+const TOOL_FAMILIES = new Set<MatrixFamily>([
+	"anthropic",
+	"openai",
+	"codex",
+	"meta",
+	"alibaba",
+]);
 
 function modelOptions(family: MatrixFamily) {
 	const maxOutputTokens = maxTokensFor(family);
-	if (!REASONING_FAMILIES.has(family)) {
+	if (!REASONING_EFFORT_FAMILIES.has(family)) {
 		return { maxOutputTokens };
 	}
 	return {
@@ -56,6 +79,10 @@ function modelOptions(family: MatrixFamily) {
 	};
 }
 
+const served = hasGatewayEnv()
+	? await fetchServedModelIds()
+	: new Set<string>();
+
 describe.skipIf(!hasGatewayEnv())(
 	"e2e — Neon AI Gateway capability matrix",
 	() => {
@@ -64,7 +91,9 @@ describe.skipIf(!hasGatewayEnv())(
 		describe.each(
 			Object.entries(MATRIX_MODELS) as Array<[MatrixFamily, string]>,
 		)("%s (%s)", (family, modelId) => {
-			it("generateText", async () => {
+			const servesModel = served.has(modelId);
+
+			it.skipIf(!servesModel)("generateText", async () => {
 				const result = await generateText({
 					model: neon(modelId),
 					prompt: PROMPT,
@@ -74,18 +103,21 @@ describe.skipIf(!hasGatewayEnv())(
 				expectNoHardFailureWarnings(result.warnings);
 			});
 
-			it("generateText with system prompt", async () => {
-				const result = await generateText({
-					model: neon(modelId),
-					system: SYSTEM,
-					prompt: "Say hello.",
-					...modelOptions(family),
-				});
-				expect(result.text.trim().length).toBeGreaterThan(0);
-				expectNoHardFailureWarnings(result.warnings);
-			});
+			it.skipIf(!servesModel)(
+				"generateText with system prompt",
+				async () => {
+					const result = await generateText({
+						model: neon(modelId),
+						system: SYSTEM,
+						prompt: "Say hello.",
+						...modelOptions(family),
+					});
+					expect(result.text.trim().length).toBeGreaterThan(0);
+					expectNoHardFailureWarnings(result.warnings);
+				},
+			);
 
-			it("streamText", async () => {
+			it.skipIf(!servesModel)("streamText", async () => {
 				const result = streamText({
 					model: neon(modelId),
 					prompt: PROMPT,
@@ -98,7 +130,7 @@ describe.skipIf(!hasGatewayEnv())(
 				expect(text.trim().length).toBeGreaterThan(0);
 			});
 
-			it.skipIf(!STRUCTURED_FAMILIES.has(family))(
+			it.skipIf(!servesModel || !STRUCTURED_FAMILIES.has(family))(
 				"generateObject",
 				async () => {
 					const result = await generateObject({
@@ -113,7 +145,7 @@ describe.skipIf(!hasGatewayEnv())(
 				},
 			);
 
-			it.skipIf(!TOOL_FAMILIES.has(family))(
+			it.skipIf(!servesModel || !TOOL_FAMILIES.has(family))(
 				"tool calling (generateText + stepCountIs)",
 				async () => {
 					const result = await generateText({
@@ -124,8 +156,42 @@ describe.skipIf(!hasGatewayEnv())(
 						...modelOptions(family),
 					});
 					expect(result.text.trim().length).toBeGreaterThan(0);
-					expect(result.steps.length).toBeGreaterThanOrEqual(1);
+					// A tool call plus a follow-up step, not one step that happened
+					// to answer. The follow-up is the leg that carries prior
+					// reasoning back to the gateway, so anything less would pass
+					// while the multi-turn path is broken.
+					expect(
+						result.steps.flatMap((step) => step.toolCalls).length,
+					).toBeGreaterThanOrEqual(1);
+					expect(result.steps.length).toBeGreaterThanOrEqual(2);
 				},
+			);
+		});
+
+		describe("OpenAI Responses — multi-step tool loop over streamText", () => {
+			// The stored-item 502 struck the second step of a loop, and
+			// `doStream` applies the request defaults on its own path, so the
+			// generateText cases above would not catch a regression there.
+			it.skipIf(!served.has(MATRIX_MODELS.openai))(
+				"gets past the step that carries reasoning back",
+				async () => {
+					const result = streamText({
+						model: neon(MATRIX_MODELS.openai),
+						prompt: "What is the temperature in Paris? Use the weather tool.",
+						tools: { weather: weatherTool },
+						stopWhen: stepCountIs(5),
+						...modelOptions("openai"),
+					});
+					await result.consumeStream();
+
+					const steps = await result.steps;
+					expect(
+						steps.flatMap((step) => step.toolCalls).length,
+					).toBeGreaterThanOrEqual(1);
+					expect(steps.length).toBeGreaterThanOrEqual(2);
+					await expect(result.text).resolves.not.toBe("");
+				},
+				120_000,
 			);
 		});
 
@@ -187,12 +253,6 @@ describe.skipIf(!hasGatewayEnv())(
 					text += part;
 				}
 				expect(text.trim().length).toBeGreaterThan(0);
-			});
-		});
-
-		describe("known gateway limitations", () => {
-			it.skip("OpenAI Responses multi-turn tool follow-up can 502 on the gateway", () => {
-				// gpt-5-mini tool calling works for the first step but follow-up requests can 502.
 			});
 		});
 	},
