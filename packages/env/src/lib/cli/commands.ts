@@ -10,6 +10,7 @@ import {
 	PlatformError,
 } from "@neon/config/v1";
 import { fetchEnvReusingSecrets } from "../reuse-secrets.js";
+import { resolveApiKey } from "./resolve-api-key.js";
 import { resolveContext } from "./resolve-context.js";
 
 /** File `env run` reads to layer one-time auth keys. Matches the Vercel/Next.js convention. */
@@ -24,7 +25,8 @@ export interface CommandEnv {
 	cwd: string;
 	/**
 	 * When set, used directly as the NeonApi. When omitted, the real adapter is built from
-	 * `options.apiKey ?? NEON_API_KEY` inside `fetchEnv`.
+	 * the key {@link resolveApiKey} resolves (`--api-key` → `NEON_API_KEY` → the Neon CLI's
+	 * stored credentials).
 	 */
 	api?: NeonApi;
 }
@@ -42,8 +44,9 @@ export interface CommandResult {
 
 /**
  * Inputs needed to resolve a branch and fetch its env, shared by `run` and `export`: an
- * optional explicit `neon.ts` path, project/branch overrides, and an API key (otherwise
- * resolved from `.neon` / `NEON_*` env by the CLI and `NEON_API_KEY` by `fetchEnv`).
+ * optional explicit `neon.ts` path, project/branch overrides, and an API key. Everything
+ * ambient — `.neon`, `NEON_*` env, the Neon CLI's stored credentials — is resolved by the
+ * CLI (see `resolveContext` and `resolveApiKey`), never by the library.
  */
 export interface EnvResolveOptions {
 	configPath?: string;
@@ -192,12 +195,15 @@ async function loadConfigAndFetchEnv(
 	const fileEnv = existsSync(envFileSource)
 		? parseEnvFile(readFileSync(envFileSource, "utf-8"))
 		: {};
+	const apiKey = resolveApiKey({
+		...(options.apiKey ? { apiKey: options.apiKey } : {}),
+	});
 	const { vars } = await fetchEnvReusingSecrets(config, {
 		projectId: resolved.projectId,
 		branch: resolved.branch,
 		env: { ...process.env, ...fileEnv },
 		...(ctx.api ? { api: ctx.api } : {}),
-		...(options.apiKey ? { apiKey: options.apiKey } : {}),
+		...(apiKey ? { apiKey } : {}),
 	});
 	return vars;
 }
@@ -291,6 +297,21 @@ function handleError(err: unknown): CommandResult {
 		return errorResult(err, `Missing context: ${err.message}`, 3);
 	if (err instanceof ConfigLoadError)
 		return errorResult(err, `Failed to load config: ${err.message}`, 4);
+	// The library's own wording is right for a library ("this package never reads
+	// NEON_API_KEY on your behalf") and wrong here: `neon-env` does read it. Render the
+	// chain this CLI actually implements, the same way an unresolved context is rendered.
+	if (err instanceof PlatformError && err.code === ErrorCode.MissingApiKey) {
+		return errorResult(
+			err,
+			[
+				"No Neon API key. `neon-env` looks for one in this order:",
+				"  - the `--api-key` flag",
+				"  - the `NEON_API_KEY` environment variable",
+				"  - `credentials.json` in `NEONCTL_CONFIG_DIR` (else `~/.config/neonctl`) — run `neon auth` to create it",
+			].join("\n"),
+			EXIT_CODE_BY_PLATFORM_ERROR_CODE[ErrorCode.MissingApiKey] ?? 1,
+		);
+	}
 	if (err instanceof PlatformError) {
 		const exitCode = EXIT_CODE_BY_PLATFORM_ERROR_CODE[err.code];
 		if (exitCode !== undefined)
