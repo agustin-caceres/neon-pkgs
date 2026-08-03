@@ -1,0 +1,175 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`api-keys create > account key when no scope is given 1`] = `
+"id: 201
+key: napi_account_secret
+name: ci
+created_at: 2026-03-01T00:00:00Z
+created_by: u-1
+"
+`;
+
+exports[`api-keys create > org key with --org-id 1`] = `
+"name: ci
+created_at: 2026-03-02T00:00:00Z
+created_by: u-1
+id: 303
+key: napi_org_secret
+"
+`;
+
+exports[`api-keys create > project-scoped key infers the org from the project 1`] = `
+"name: agent
+created_at: 2026-03-02T00:00:00Z
+created_by: u-1
+id: 303
+key: napi_org_secret
+project_id: proj-in-org
+"
+`;
+
+exports[`api-keys create > refuses --no-project-id rather than widening the key 1`] = `""`;
+
+exports[`api-keys create > refuses a misspelled scope flag rather than widening the key 1`] = `""`;
+
+exports[`api-keys create > refuses a repeated scope flag 1`] = `""`;
+
+exports[`api-keys create > refuses an empty --name 1`] = `""`;
+
+exports[`api-keys create > refuses an empty --org-id 1`] = `""`;
+
+exports[`api-keys create > refuses an empty --project-id instead of widening the key 1`] = `""`;
+
+exports[`api-keys create > refuses both scope flags together 1`] = `""`;
+
+exports[`api-keys create > refuses scope flags after a -- terminator 1`] = `""`;
+
+exports[`api-keys create > table output puts the secret on its own line 1`] = `
+"API key
+┌─────┬───────┬─────────────┐
+│ Id  │ Name  │ Project     │
+├─────┼───────┼─────────────┤
+│ 303 │ agent │ proj-in-org │
+└─────┴───────┴─────────────┘
+
+napi_org_secret
+"
+`;
+
+exports[`api-keys create refuses an unusable response > an org-wide create that comes back scoped is refused 1`] = `""`;
+
+exports[`api-keys create refuses an unusable response > explains a project that belongs to no organization 1`] = `""`;
+
+exports[`api-keys create refuses an unusable response > no key in the body 1`] = `""`;
+
+exports[`api-keys create refuses an unusable response > not scoped at all, and the withdrawal fails 1`] = `""`;
+
+exports[`api-keys create refuses an unusable response > prints no secret when it refuses 1`] = `""`;
+
+exports[`api-keys create refuses an unusable response > scoped to the wrong project — withdrawn, and says so 1`] = `""`;
+
+exports[`api-keys list > account keys 1`] = `
+"- id: 101
+  name: laptop
+  created_at: 2026-01-01T00:00:00Z
+  created_by:
+    id: u-1
+    name: Test
+    image: ""
+  last_used_at: 2026-02-01T00:00:00Z
+  last_used_from_addr: 203.0.113.1
+"
+`;
+
+exports[`api-keys list > json output keeps the raw API shape 1`] = `
+"[
+  {
+    "id": 301,
+    "name": "scoped",
+    "project_id": "proj-in-org",
+    "created_at": "2026-01-02T00:00:00Z",
+    "created_by": {
+      "id": "u-1",
+      "name": "Test",
+      "image": ""
+    }
+  },
+  {
+    "id": 302,
+    "name": "org-wide",
+    "created_at": "2026-01-03T00:00:00Z",
+    "created_by": {
+      "id": "u-1",
+      "name": "Test",
+      "image": ""
+    },
+    "last_used_at": "2026-02-03T00:00:00Z",
+    "last_used_from_addr": "203.0.113.9"
+  }
+]"
+`;
+
+exports[`api-keys list > org keys carry the project each is scoped to 1`] = `
+"- id: 301
+  name: scoped
+  project_id: proj-in-org
+  created_at: 2026-01-02T00:00:00Z
+  created_by:
+    id: u-1
+    name: Test
+    image: ""
+- id: 302
+  name: org-wide
+  created_at: 2026-01-03T00:00:00Z
+  created_by:
+    id: u-1
+    name: Test
+    image: ""
+  last_used_at: 2026-02-03T00:00:00Z
+  last_used_from_addr: 203.0.113.9
+"
+`;
+
+exports[`api-keys list > table output names the unscoped rows 1`] = `
+"API keys in org-7
+┌─────┬──────────┬────────────────┬──────────────────────┬──────────────────────┬─────────────────────┐
+│ Id  │ Name     │ Project        │ Created At           │ Last Used At         │ Last Used From Addr │
+├─────┼──────────┼────────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ 301 │ scoped   │ proj-in-org    │ 2026-01-02T00:00:00Z │                      │                     │
+├─────┼──────────┼────────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ 302 │ org-wide │ (all projects) │ 2026-01-03T00:00:00Z │ 2026-02-03T00:00:00Z │ 203.0.113.9         │
+└─────┴──────────┴────────────────┴──────────────────────┴──────────────────────┴─────────────────────┘
+"
+`;
+
+exports[`api-keys revoke > a 404 on the account path suggests --org-id 1`] = `""`;
+
+exports[`api-keys revoke > account key 1`] = `
+"id: 999
+name: laptop
+revoked: true
+last_used_at: 2026-02-01T00:00:00Z
+last_used_from_addr: 203.0.113.1
+"
+`;
+
+exports[`api-keys revoke > and a 404 on the org path suggests dropping it 1`] = `""`;
+
+exports[`api-keys revoke > names the id the user typed, not NaN 1`] = `""`;
+
+exports[`api-keys revoke > org key 1`] = `
+"id: 888
+name: org-wide
+revoked: true
+last_used_at: 2026-02-03T00:00:00Z
+last_used_from_addr: 203.0.113.9
+"
+`;
+
+exports[`api-keys revoke > refuses a hex or exponent id 1`] = `""`;
+
+exports[`api-keys revoke > refuses a non-numeric id instead of sending NaN 1`] = `""`;
+
+exports[`api-keys revoke > refuses a non-numeric id, naming what was typed 1`] = `""`;
+
+exports[`api-keys revoke > refuses an empty --org-id rather than hitting the account endpoint 1`] = `""`;
