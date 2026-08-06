@@ -8,74 +8,70 @@
 // `(string & {})` fallback on `NeonChatModelId`.
 //
 // `NEON_MODELS_DEV_IDS` mirrors the models.dev `neon` catalog exactly — the
-// `neon-catalog-drift.test.ts` maintainer check fails if the two diverge.
-// `NEON_EXTRA_MODEL_IDS` are additional ids the gateway serves that models.dev
-// does not (yet) list; they are kept for autocomplete and verified to resolve
-// against the gateway. The authoritative, always-current catalog is shown in
-// the Neon Console under the branch's "AI Gateway" tab.
+// `neon-catalog-drift.test.ts` maintainer check fails if the two diverge. The
+// authoritative, always-current catalog is shown in the Neon Console under the
+// branch's "AI Gateway" tab.
+//
+// There is deliberately no second list for ids the gateway serves ahead of
+// models.dev. Such an id already works — `NeonChatModelId` accepts any string —
+// so a hand-maintained list would buy autocomplete for a few days at the cost of
+// a surface that silently rots, which is what happened last time. The fix for a
+// gateway model missing here is to add it to models.dev; Orbit's catalog-parity
+// job reports that gap daily.
 
 /** The models.dev `neon` catalog (canonical, unprefixed ids). */
 export const NEON_MODELS_DEV_IDS = [
 	// Anthropic (native Messages API)
-	"claude-opus-4-7",
-	"claude-opus-4-6",
-	"claude-opus-4-5",
-	"claude-opus-4-1",
-	"claude-sonnet-4-6",
-	"claude-sonnet-4-5",
-	"claude-sonnet-4",
+	"claude-fable-5",
 	"claude-haiku-4-5",
+	"claude-opus-4-1",
+	"claude-opus-4-5",
+	"claude-opus-4-6",
+	"claude-opus-4-7",
+	"claude-opus-4-8",
+	"claude-opus-5",
+	"claude-sonnet-4-5",
+	"claude-sonnet-4-6",
+	"claude-sonnet-5",
 	// OpenAI (native Responses API)
 	"gpt-5",
-	"gpt-5-mini",
-	"gpt-5-nano",
 	"gpt-5-1",
 	"gpt-5-2",
+	"gpt-5-3-codex",
 	"gpt-5-4",
 	"gpt-5-4-mini",
 	"gpt-5-4-nano",
 	"gpt-5-5",
+	"gpt-5-5-pro",
+	"gpt-5-6-luna",
+	"gpt-5-6-sol",
+	"gpt-5-6-terra",
+	"gpt-5-mini",
+	"gpt-5-nano",
 	// OpenAI open-weight (unified MLflow endpoint)
 	"gpt-oss-120b",
 	"gpt-oss-20b",
 	// Google (unified MLflow endpoint)
-	"gemini-3-pro",
-	"gemini-3-flash",
-	"gemini-3-1-pro",
 	"gemini-3-1-flash-lite",
-	"gemini-2-5-pro",
-	"gemini-2-5-flash",
-] as const;
-
-/**
- * Ids the gateway serves that the models.dev `neon` provider does not list.
- * Verified to resolve against the gateway; retained for autocomplete. If
- * models.dev later lists one of these, the drift check flags it for promotion
- * into `NEON_MODELS_DEV_IDS`.
- */
-export const NEON_EXTRA_MODEL_IDS = [
-	// Anthropic (native Messages API)
-	"claude-opus-4-8",
-	// OpenAI (native Responses API) — Codex is served only natively
-	"gpt-5-2-codex",
-	"gpt-5-3-codex",
-	"gpt-5-5-pro",
-	// Google (unified MLflow endpoint)
+	"gemini-3-1-pro",
 	"gemini-3-5-flash",
+	"gemini-3-flash",
 	"gemma-3-12b",
 	// Meta (unified MLflow endpoint)
 	"llama-4-maverick",
-	"meta-llama-3-3-70b-instruct",
 	"meta-llama-3-1-8b-instruct",
+	"meta-llama-3-3-70b-instruct",
 	// Alibaba (unified MLflow endpoint)
 	"qwen3-next-80b-a3b-instruct",
 	"qwen35-122b-a10b",
+	// Zhipu (unified MLflow endpoint)
+	"glm-5-2",
+	// Thinking Machines (unified MLflow endpoint)
+	"inkling",
 ] as const;
 
-/** A known Neon AI Gateway model id (models.dev catalog + gateway extras). */
-export type NeonKnownModelId =
-	| (typeof NEON_MODELS_DEV_IDS)[number]
-	| (typeof NEON_EXTRA_MODEL_IDS)[number];
+/** A known Neon AI Gateway model id. */
+export type NeonKnownModelId = (typeof NEON_MODELS_DEV_IDS)[number];
 
 /**
  * A Neon AI Gateway model id. Known ids are listed for autocomplete; any other

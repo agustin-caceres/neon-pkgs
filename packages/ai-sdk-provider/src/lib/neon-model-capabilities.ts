@@ -47,6 +47,13 @@ export interface NeonModelCapabilities {
 	supportsSeed: boolean;
 	supportsStopSequences: boolean;
 	supportsReasoningEffort: boolean;
+	/**
+	 * True when a `claude-*` id could not be parsed into a version and was
+	 * assumed to be new. The sampling restriction is then a precaution rather
+	 * than something measured, and the warning says so instead of asserting a
+	 * capability nobody checked.
+	 */
+	claudeSamplingUnrecognized?: boolean;
 }
 
 const PERMISSIVE: Omit<NeonModelCapabilities, "family"> = {
@@ -58,6 +65,27 @@ const PERMISSIVE: Omit<NeonModelCapabilities, "family"> = {
 	supportsStopSequences: true,
 	supportsReasoningEffort: true,
 };
+
+/**
+ * Whether a Claude id predates the 4.7 cutoff where the gateway stopped
+ * accepting `temperature` and `top_p`. Ids look like `claude-<tier>-<major>` or
+ * `claude-<tier>-<major>-<minor>`, optionally behind the legacy `databricks-`
+ * prefix. An id we cannot parse is treated as new, which is the safe direction.
+ */
+function claudeVersion(id: string): { major: number; minor: number } | null {
+	// Anchored: `claude-opus-4-beta` and `claude-opus-4.7` must not match their
+	// leading digits and be read as old models. A dated id such as
+	// `claude-3-5-sonnet-20241022` does not parse either, and is reported as
+	// unrecognised rather than silently classified.
+	const match = /^(?:databricks-)?claude-[a-z]+-(\d+)(?:-(\d+))?$/.exec(id);
+	if (!match) {
+		return null;
+	}
+	return {
+		major: Number(match[1]),
+		minor: match[2] === undefined ? 0 : Number(match[2]),
+	};
+}
 
 /**
  * Heuristic, prefix-based capability detection for MLflow-routed Neon models.
@@ -75,16 +103,30 @@ export function getNeonModelCapabilities(
 
 	// Anthropic (Claude): rejects penalties and seed, accepts only one of
 	// temperature/topP, and rejects the OpenAI `reasoning_effort` field.
+	//
+	// From Claude 4.7 onward the gateway also rejects non-default sampling
+	// entirely — `does not support the temperature parameter` /
+	// `does not support sampling parameters: top_p` — because those models are
+	// steered with `output_config.effort` instead. Measured: 4.1/4.5/4.6 accept
+	// both, 4.7/4.8/5 reject both, and every id accepts the default
+	// `temperature: 1.0`. A version comparison rather than a list of ids, so a
+	// future Claude inherits the restriction: dropping a parameter the model
+	// would have accepted costs a warning, claiming one it rejects costs a 400.
 	if (id.includes("claude")) {
+		const version = claudeVersion(id);
+		const sampling =
+			version !== null &&
+			(version.major < 4 || (version.major === 4 && version.minor <= 6));
 		return {
 			family: "anthropic",
-			supportsTemperature: true,
-			supportsTopP: true,
+			supportsTemperature: sampling,
+			supportsTopP: sampling,
 			temperatureTopPMutuallyExclusive: true,
 			supportsPenalties: false,
 			supportsSeed: false,
 			supportsStopSequences: true,
 			supportsReasoningEffort: false,
+			...(version === null ? { claudeSamplingUnrecognized: true } : {}),
 		};
 	}
 
@@ -132,6 +174,33 @@ export function getNeonModelCapabilities(
 			supportsStopSequences: true,
 			supportsReasoningEffort: true,
 		};
+	}
+
+	// Everything else on the unified endpoint rejects penalties with
+	// `parameter "frequency_penalty" must be equal to 0`. Gemini, handled above,
+	// is the only MLflow-routed family that accepts them. Seed and stop vary, so
+	// each family carries what was measured rather than inheriting a guess.
+	if (id.includes("gpt-oss")) {
+		return {
+			family: "other",
+			...PERMISSIVE,
+			supportsPenalties: false,
+			supportsSeed: false,
+			supportsStopSequences: false,
+		};
+	}
+
+	if (id.includes("qwen") || id.includes("gemma")) {
+		return {
+			family: "other",
+			...PERMISSIVE,
+			supportsPenalties: false,
+			supportsSeed: false,
+		};
+	}
+
+	if (id.includes("glm") || id.includes("inkling")) {
+		return { family: "other", ...PERMISSIVE, supportsPenalties: false };
 	}
 
 	return { family: "other", ...PERMISSIVE };

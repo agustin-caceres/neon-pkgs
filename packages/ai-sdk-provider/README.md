@@ -59,11 +59,48 @@ Routing matches on the model id.
 
 ## Capabilities
 
-`generateText` and `streamText` work with any model available to your branch. `generateObject`, `streamObject`, and single- or multi-step tool calls work with OpenAI (including Codex), Meta, and Alibaba models. Gemini currently supports `generateText` and `streamText`; structured output and multi-step tools are not supported. Vision input works on models that accept images.
+`generateText` and `streamText` work with any model available to your branch. `generateObject`, `streamObject`, and single- or multi-step tool calls work with OpenAI (including Codex), Meta, Alibaba, Zhipu AI, and Thinking Machines models. Gemini currently supports `generateText` and `streamText`; structured output and multi-step tools are not supported. Vision input works on models that accept images.
 
-Claude models use the Messages API when `claude-*` ids are available. For models using Chat Completions, the provider removes unsupported options such as penalties or `seed` for Llama and `reasoningEffort` for Gemini, then reports them in `result.warnings` instead of failing the request. Unsupported Responses API storage options throw before a request is sent — see [Errors](#errors).
+Claude models use the Messages API. On both that route and Chat Completions the provider removes call options the gateway rejects and reports each one in `result.warnings` instead of failing the request — see [Dropped call options](#dropped-call-options). Unsupported Responses API storage options throw before a request is sent — see [Errors](#errors).
 
-Which ids your branch serves is account-specific during the beta; `GET $NEON_AI_GATEWAY_BASE_URL/v1/models` is the authoritative list.
+Which ids your branch serves is account-specific during the beta; `GET $NEON_AI_GATEWAY_BASE_URL/v1/models` is the authoritative list. `NeonChatModelId` accepts any string, so an id this package has not caught up with still works — and, equally, an id the gateway has retired still type-checks and fails at the gateway instead.
+
+### Dropped call options
+
+Upstream backends behind the gateway accept different subsets of the OpenAI-style parameters the AI SDK emits, and sending one an upstream rejects is a hard `400`. The provider drops those before the request and records a warning in `result.warnings`, so a call succeeds instead of failing on a parameter you passed in good faith.
+
+These rules apply on the Anthropic Messages and Chat Completions routes. The Responses route (every `gpt-*` id) relies on the upstream OpenAI model's own stripping instead, so its behaviour is the AI SDK's rather than described here — but `getNeonModelCapabilities` still answers for those ids.
+
+| Models | Dropped |
+| --- | --- |
+| Claude 4.7 and newer (`claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`) | `temperature`, `topP` |
+| All Claude | `frequencyPenalty`, `presencePenalty`, `seed`, `reasoningEffort`, and `topP` when you set both `temperature` and `topP` (Anthropic accepts only one) |
+| `gpt-oss` | `frequencyPenalty`, `presencePenalty`, `seed`, `stopSequences` |
+| Qwen, Gemma | `frequencyPenalty`, `presencePenalty`, `seed` |
+| `glm-5-2`, `inkling` | `frequencyPenalty`, `presencePenalty` |
+| Meta Llama | `frequencyPenalty`, `presencePenalty`, `seed` |
+| Gemini | `reasoningEffort` |
+
+**`temperature` on a Claude 5 model therefore has no effect.** That is the gateway's behaviour, not a provider choice; sending it returns `does not support the temperature parameter`. Steer those models with Anthropic's own effort control instead — note that this is `effort`, not the OpenAI-style `reasoningEffort`, which every Claude id drops:
+
+```typescript
+await generateText({
+  model: neon('claude-opus-5'),
+  prompt: 'Plan a schema migration.',
+  providerOptions: { anthropic: { effort: 'high' } }, // low | medium | high | xhigh | max
+});
+```
+
+Query the rules directly rather than hardcoding them:
+
+```typescript
+import { getNeonModelCapabilities } from '@neon/ai-sdk-provider';
+
+getNeonModelCapabilities('claude-opus-5').supportsTemperature; // false
+getNeonModelCapabilities('glm-5-2').supportsPenalties; // false
+```
+
+Gemini is the only family on the unified endpoint that accepts penalties. A model none of these rules match is left untouched, so a brand-new id gets the gateway's own error rather than a guess.
 
 ## Image generation
 
@@ -181,4 +218,4 @@ cp .env.example .env   # fill NEON_AI_GATEWAY_BASE_URL + NEON_AI_GATEWAY_TOKEN f
 pnpm test:e2e
 ```
 
-The matrix covers one models.dev `neon` model per family (Anthropic, OpenAI, Codex, Gemini, Meta, Alibaba) across `generateText`, `streamText`, `generateObject`, tool calling, and `neon.tools.imageGeneration`. `generateObject` and tool calling run on the subset of families where they are verified (see [Capabilities](#capabilities)); a family whose representative id the branch does not serve is skipped rather than failed. It also fetches the live `/v1/models` catalog and calls every currently enabled model with both AI SDK 6 and AI SDK 7. Tests are skipped when gateway env vars are absent.
+The matrix covers one models.dev `neon` model per family (Anthropic, OpenAI, Codex, Gemini, Meta, Alibaba, Zhipu, Thinking Machines) across `generateText`, `streamText`, `generateObject`, tool calling, and `neon.tools.imageGeneration`. `generateObject` and tool calling run on the subset of families where they are verified (see [Capabilities](#capabilities)); a family whose representative id the branch does not serve is skipped rather than failed. It also fetches the live `/v1/models` catalog and calls every currently enabled model with both AI SDK 6 and AI SDK 7. Tests are skipped when gateway env vars are absent.

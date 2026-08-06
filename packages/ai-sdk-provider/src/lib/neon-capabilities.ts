@@ -6,6 +6,13 @@ import type {
 } from "@ai-sdk/provider";
 import { getNeonModelCapabilities } from "./neon-model-capabilities.js";
 
+const PENALTY_DETAILS =
+	"Only Gemini accepts penalties on the gateway's unified endpoint, so it was dropped rather than sent.";
+const GENERIC_DETAILS =
+	"The Neon AI Gateway rejects this parameter for this model, so it was dropped rather than sent.";
+const REASONING_EFFORT_DETAILS =
+	"This model does not take the OpenAI reasoning_effort field, so it was dropped rather than sent.";
+
 /**
  * Drop call options the resolved model's upstream backend does not accept and
  * collect a warning for each, so callers get a clear signal instead of a hard
@@ -19,21 +26,38 @@ export function applyNeonCapabilities(
 	const warnings: SharedV3Warning[] = [];
 	const patch: Partial<LanguageModelV3CallOptions> = {};
 
-	const dropUnsupported = (feature: string) => {
-		warnings.push({
-			type: "unsupported",
-			feature,
-			details: `${feature} is not supported by the Neon AI Gateway for ${caps.family} model "${modelId}" and was dropped.`,
-		});
+	// The AI SDK prints the provider, the model id and the feature name ahead of
+	// `details`, so each reason says only what those cannot: why the gateway
+	// refuses it, and what to use instead. Each carries its own "was dropped"
+	// clause rather than a shared suffix — appending one everywhere restated the
+	// penalty reason and asserted a 400 for the unrecognised case, which is the
+	// overstatement this wording exists to avoid.
+	const drop = (
+		feature: string,
+		details: string,
+		type: "unsupported" | "compatibility" = "unsupported",
+	) => {
+		warnings.push({ type, feature, details });
 	};
+
+	// Precautionary rather than measured, so it is flagged as a compatibility
+	// choice: the SDK renders `unsupported` as a flat "is not supported", which
+	// would contradict the hedge in the sentence that follows it.
+	const unrecognizedClaude = caps.claudeSamplingUnrecognized === true;
+	const samplingDetails = unrecognizedClaude
+		? "This Claude version was not recognised. Claude 4.7 and newer reject sampling parameters, so it was dropped as a precaution; set `providerOptions.anthropic.effort` instead."
+		: caps.family === "anthropic"
+			? "Claude 4.7 and newer reject sampling parameters, so it was dropped rather than sent. Use `providerOptions.anthropic.effort` (low | medium | high | xhigh | max) to steer these models."
+			: "The Neon AI Gateway rejects this parameter for this model, so it was dropped rather than sent.";
+	const samplingType = unrecognizedClaude ? "compatibility" : "unsupported";
 
 	if (options.temperature != null && !caps.supportsTemperature) {
 		patch.temperature = undefined;
-		dropUnsupported("temperature");
+		drop("temperature", samplingDetails, samplingType);
 	}
 	if (options.topP != null && !caps.supportsTopP) {
 		patch.topP = undefined;
-		dropUnsupported("topP");
+		drop("topP", samplingDetails, samplingType);
 	}
 
 	// Anthropic-style models accept only one of temperature / topP.
@@ -49,26 +73,27 @@ export function applyNeonCapabilities(
 		warnings.push({
 			type: "compatibility",
 			feature: "topP",
-			details: `${caps.family} models accept only one of temperature or topP; topP was dropped.`,
+			details:
+				"Anthropic models accept only one of temperature or topP; topP was dropped and temperature kept.",
 		});
 	}
 
 	if (options.frequencyPenalty != null && !caps.supportsPenalties) {
 		patch.frequencyPenalty = undefined;
-		dropUnsupported("frequencyPenalty");
+		drop("frequencyPenalty", PENALTY_DETAILS);
 	}
 	if (options.presencePenalty != null && !caps.supportsPenalties) {
 		patch.presencePenalty = undefined;
-		dropUnsupported("presencePenalty");
+		drop("presencePenalty", PENALTY_DETAILS);
 	}
 	if (options.seed != null && !caps.supportsSeed) {
 		patch.seed = undefined;
-		dropUnsupported("seed");
+		drop("seed", GENERIC_DETAILS);
 	}
 
 	if (options.stopSequences != null && !caps.supportsStopSequences) {
 		patch.stopSequences = undefined;
-		dropUnsupported("stopSequences");
+		drop("stopSequences", GENERIC_DETAILS);
 	}
 
 	if (!caps.supportsReasoningEffort) {
@@ -81,7 +106,7 @@ export function applyNeonCapabilities(
 			);
 
 		if (hasProviderEffort) {
-			dropUnsupported("reasoningEffort");
+			drop("reasoningEffort", REASONING_EFFORT_DETAILS);
 			if (providerOptions != null) {
 				const cleaned: SharedV3ProviderOptions = {};
 				for (const [key, group] of Object.entries(providerOptions)) {
