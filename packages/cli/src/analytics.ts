@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
-
 import { Analytics, type TrackParams } from "@segment/analytics-node";
+import { inspectCredentials } from "./_shared/credentials.js";
 import { getApiClient, isNeonApiError } from "./api.js";
+import { getAuthContext } from "./auth_context.js";
 import { credentialsPath } from "./config.js";
 import { isCurrentBranchProbe } from "./context.js";
 import { getGithubEnvVars, isCi } from "./env.js";
@@ -94,13 +94,24 @@ export const analyticsMiddleware = async (args: {
 		return;
 	}
 
+	// Read the credentials this invocation actually authenticated with, which `ensureAuth`
+	// recorded. Reading `DEFAULT`'s unconditionally attributed every `--profile`-selected
+	// command to whichever account happened to be the default one.
+	const authenticatedAs =
+		getAuthContext()?.credentialsPath ?? credentialsPath(args.configDir);
+	// Telemetry must never turn a damaged or unreadable credentials file into a failed command.
 	try {
-		const credentials = readFileSync(credentialsPath(args.configDir), {
-			encoding: "utf-8",
-		});
-		userId = JSON.parse(credentials).user_id;
+		const read = inspectCredentials(authenticatedAs);
+		if (
+			read.kind === "ok" &&
+			typeof read.credentials.user_id === "string"
+		) {
+			userId = read.credentials.user_id;
+		} else if (read.kind !== "ok") {
+			log.debug("No usable credentials at %s", authenticatedAs);
+		}
 	} catch (err) {
-		log.debug("Failed to read credentials file", err);
+		log.debug("Could not read %s: %s", authenticatedAs, err);
 	}
 
 	try {

@@ -1,11 +1,11 @@
 /**
- * # `@neon/config/paths` — where the Neon CLIs keep their files on disk
+ * # Where the Neon CLIs keep their files on disk
  *
- * **Implementor-only, and deliberately impure.** This subpath reads environment variables
- * and touches the filesystem, which the root `@neon/config` export must never do — the same
- * split as `@neon/env` (pure) versus `@neon/env/runtime` (stateful). Import it from a CLI,
- * never from a `neon.ts` policy. It imports nothing from the rest of the package, so pulling
- * it in costs one module.
+ **Deliberately impure.** It reads environment variables and touches the filesystem, which
+ * `@neon/config` — the package this used to be a subpath of — must never do from its root
+ * export. It lives here instead of there precisely so that a policy-facing package does not
+ * carry implementor-only code, and so `neon-init`, which has no workspace dependencies, can use
+ * the same resolution as everything else.
  *
  * It exists because three separate readers each grew their own answer to "where is the
  * config directory", and all three disagreed: `packages/cli` honoured `XDG_CONFIG_HOME` but
@@ -137,3 +137,58 @@ function nonEmpty(value: string | undefined): string | undefined {
 	const trimmed = value.trim();
 	return trimmed === "" ? undefined : trimmed;
 }
+
+export const CREDENTIALS_FILE = "credentials.json";
+
+/**
+ * Default for `--config-dir`: `$XDG_CONFIG_HOME/neon`, else `~/.config/neon`.
+ *
+ * The directory was called `neonctl` until the CLI was renamed. An existing one is still read —
+ * see {@link credentialsPath} — but it is never written to, moved, or deleted.
+ */
+export const defaultDir = configDir();
+
+/**
+ * Where this invocation's `credentials.json` lives.
+ *
+ * When `--config-dir` was left at its default, an existing file in the legacy `neonctl`
+ * directory is used **in place**: an install that predates the rename keeps working, and its
+ * credentials are never duplicated into a second location where one copy could go stale while
+ * another tool still reads it.
+ *
+ * A `--config-dir` the user actually passed is used exactly as given. Falling back out of an
+ * explicitly chosen directory would defeat the reason for choosing it — a CI run pointed at a
+ * scratch directory must never pick up a developer's real credentials.
+ */
+export const credentialsPath = (dir: string): string =>
+	resolveConfigFile(CREDENTIALS_FILE, dir === defaultDir ? {} : { dir }).path;
+
+/**
+ * Whether a credentials file is one the CLI created, rather than a path a profile adopted.
+ *
+ * Anything that deletes a credential has to ask this first. A profile entry may point anywhere —
+ * that is what makes adopting an existing directory a one-line edit — and a file we did not
+ * create is not ours to remove.
+ */
+export const isInsideConfigDir = (
+	configDirectory: string,
+	file: string,
+): boolean => `${resolve(file)}/`.startsWith(`${resolve(configDirectory)}/`);
+
+/**
+ * Whether a credentials file is one the CLI owns, counting the legacy `neonctl` directory.
+ *
+ * {@link credentialsPath} deliberately reads an existing legacy file in place rather than
+ * migrating it, so for a default config directory that file is ours even though it sits outside
+ * `neon/`. Judging ownership on the current directory alone would call an install that predates
+ * the rename "adopted".
+ */
+export const isOwnedCredentialPath = (
+	configDirectory: string,
+	file: string,
+): boolean => {
+	if (isInsideConfigDir(configDirectory, file)) return true;
+	if (configDirectory !== defaultDir) return false;
+	const legacy = legacyConfigDir();
+	return legacy !== undefined && isInsideConfigDir(legacy, file);
+};

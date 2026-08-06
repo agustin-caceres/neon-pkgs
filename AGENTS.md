@@ -292,17 +292,42 @@ the same thing with a subpath:
 | Entry point | For | Side effects |
 | --- | --- | --- |
 | `@neon/config` / `@neon/config/v1` | `neon.ts` policies, apps, anything embedding the toolchain | None. Never reads `process.env` or a file |
-| `@neon/config/paths` | Our own CLIs — `packages/cli`, `packages/env` | Reads env vars and stats the filesystem to locate the config directory |
 
 `paths` exists because three readers each grew their own answer to "where is the config
 directory" and all three disagreed: the CLI honoured `XDG_CONFIG_HOME` but not
 `NEONCTL_CONFIG_DIR`, `@neon/env` honoured the env var but not XDG, and `neon-init`
 hardcoded `~/.config/neonctl`. With `XDG_CONFIG_HOME` set, the CLI wrote credentials
-somewhere the other two never looked. Add a reader to that module rather than to a fourth
-private copy. (`neon-init` still has an inline copy, deliberately — it has no workspace
-dependencies and taking one on `@neon/config` would pull `@neon/sdk`, `zod` and `jiti` into
-its install footprint for a file path. That copy disappears when the package folds into
-`packages/cli`.)
+somewhere the other two never looked. **That implementation now lives in `shared/cli-core`**, and
+the `@neon/config/paths` subpath is gone — it was a workaround for having nowhere else to put
+implementor-only code, was never documented in the package's README, and nothing outside this
+repo imported it. See below.
+
+### `shared/cli-core` — code every CLI compiles as its own
+
+Credential reading, profile resolution and config paths are shared by `neon`, `@neon/env` and
+`neon-init` from `shared/cli-core/src` — the three that read a credential off disk;
+`@neon/config` takes an explicit key and reads nothing. It is **not a package**:
+`scripts/sync-shared.mjs <dir>` copies it into that one consumer's `src/_shared`, atomically
+and one package per invocation so concurrent builds cannot race. Every script that compiles or
+typechecks a consumer's source runs it first; that copy is gitignored, and the imports are
+relative, so the code is compiled into every `dist` and nothing resolves at runtime. **If you
+add a script that reads `src/`, add the sync to it** — otherwise it can compile a stale copy.
+
+It is not a workspace package because it cannot be one. Every package here builds with
+`bundle: false` or plain `tsc`, so a bare specifier survives into `dist` and must resolve
+from `node_modules` — which an unpublished package cannot do for anyone who installed `neon`
+from npm. `bundledDependencies` is the mechanism for exactly that and pnpm refuses it here
+(`ERR_PNPM_BUNDLED_DEPENDENCIES_WITHOUT_HOISTED`; it needs `nodeLinker: hoisted`). Publishing
+it would put an internal surface on the registry, and `@neon/config` — the one published
+package all of this could hang off — is consumer-facing.
+
+**Edit `shared/cli-core/src`, never `packages/*/src/_shared`.** Keep it dependency-free (Node
+builtins only, because `neon-init` has no workspace dependencies), and keep loggers, yargs and
+API clients out of it — take a callback or a value instead. Its own unit tests live in `packages/cli`; `@neon/env`
+also exercises it through `resolve-api-key.test.ts`, which is where the two CLIs' precedence is
+checked against each other. Nothing re-exports it from a published
+package: the code reaches each CLI by being compiled into it, so credential paths and ownership
+checks cannot become someone else's public API by accident.
 
 The directory is `neon`; `neonctl` is the pre-rename name and is **read forever, in place**.
 Nothing is moved, copied, or deleted, so a second copy of a credential can never go stale

@@ -1,7 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { log } from "@clack/prompts";
 import { execa } from "execa";
+import {
+	inspectCredentials,
+	interpretCredentials,
+} from "../_shared/credentials.js";
+import { resolveConfigFile } from "../_shared/paths.js";
+import { DEFAULT_PROFILE } from "../_shared/profiles.js";
 
 export interface AuthOptions {
 	json?: boolean;
@@ -53,54 +57,36 @@ export async function isAuthenticated(): Promise<boolean> {
 }
 
 /**
- * Gets the OAuth access token from the Neon CLI's stored credentials.
+ * The credential the Neon CLI has stored, or `null` when there is none.
  *
- * Kept inline rather than importing `@neon/config/paths`: this package has no workspace
- * dependencies, and taking one on `@neon/config` would pull `@neon/sdk`, `zod` and `jiti`
- * into the install footprint of a package whose only need here is a file path. The
- * resolution below must stay identical to `packages/config/src/paths.ts`, which is the
- * canonical implementation — and it collapses entirely once this package folds into
- * `packages/cli`.
+ * Shares the reader with `neon` and `@neon/env` rather than keeping a copy — the inline path
+ * resolution this replaced was the third implementation of "where is the config directory", and
+ * it also looked only for `access_token`, so an account signed in with an API key read as not
+ * authenticated and got sent to a browser. See `shared/cli-core/README.md`.
+ *
+ * `null` means *absent*, and only absent. A file that exists and cannot be read throws: this
+ * value decides whether to start a browser sign-in, and a sign-in overwrites the file it could
+ * not read — as a different account, if a different one is chosen. Catching every error here
+ * made a damaged credential indistinguishable from a fresh machine.
  */
 async function getNeonctlAccessToken(): Promise<string | null> {
-	try {
-		for (const path of credentialsCandidates()) {
-			if (!existsSync(path)) continue;
-			const credentials = JSON.parse(readFileSync(path, "utf-8"));
-			if (credentials.access_token) return credentials.access_token;
-		}
-		return null;
-	} catch {
-		return null;
+	const { path } = resolveConfigFile("credentials.json");
+	const read = inspectCredentials(path);
+	if (read.kind === "absent") return null;
+	if (read.kind === "unusable") {
+		throw new Error(
+			`${read.reason}. Replace it deliberately with \`neon profile create ${DEFAULT_PROFILE} --force\`, or delete the file.`,
+		);
 	}
-}
-
-/**
- * Where the Neon CLI may keep `credentials.json`, most specific first: an explicitly
- * configured directory, else `$XDG_CONFIG_HOME`/`~/.config` under the current `neon`
- * directory and then the legacy `neonctl` one. An explicit directory is exact — it never
- * falls back to the legacy name.
- */
-function credentialsCandidates(): string[] {
-	const env = process.env;
-	const explicit =
-		trimmed(env.NEON_CONFIG_DIR) ?? trimmed(env.NEONCTL_CONFIG_DIR);
-	if (explicit) return [resolve(explicit, "credentials.json")];
-
-	const home = trimmed(env.HOME) ?? trimmed(env.USERPROFILE);
-	const base =
-		trimmed(env.XDG_CONFIG_HOME) ??
-		(home ? resolve(home, ".config") : null);
-	if (!base) return [];
-	return [
-		resolve(base, "neon", "credentials.json"),
-		resolve(base, "neonctl", "credentials.json"),
-	];
-}
-
-function trimmed(value: string | undefined): string | null {
-	const v = value?.trim();
-	return v ? v : null;
+	// `neon init` has no profile selection — it reads the default credential and refuses
+	// when one is named, so `DEFAULT` is the only profile this can ever be about.
+	const credential = interpretCredentials(read.credentials, {
+		path,
+		profile: DEFAULT_PROFILE,
+	});
+	if (credential.kind === "api_key") return credential.apiKey;
+	const token = read.credentials.access_token;
+	return typeof token === "string" && token.trim() !== "" ? token : null;
 }
 
 /**

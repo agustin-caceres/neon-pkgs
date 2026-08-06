@@ -8,15 +8,34 @@ import {
 import type { AddressInfo } from "node:net";
 import type { OAuth2Server } from "oauth2-mock-server";
 import { join } from "path";
-import { afterAll, beforeAll, beforeEach, describe, expect, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	vi,
+} from "vitest";
 import type { NeonApiClient } from "../api.js";
 import * as authModule from "../auth";
 import { test } from "../test_utils/fixtures";
 import { startOauthServer } from "../test_utils/oauth_server";
-import { authFlow, deleteCredentials, ensureAuth } from "./auth";
+import { authFlow, deleteCredentialsAt, ensureAuth } from "./auth";
 
 vi.mock("open", () => ({ default: vi.fn((url: string) => fetch(url)) }));
 vi.mock("../pkg.ts", () => ({ default: { version: "0.0.0" } }));
+
+// Neither suite names a credential explicitly, so an exported NEON_API_KEY or NEON_PROFILE in
+// the shell running the tests would redirect them: the key would satisfy auth outright, and the
+// profile would send `authFlow` to write `credentials.<name>.json` instead of `credentials.json`.
+beforeEach(() => {
+	vi.stubEnv("NEON_API_KEY", "");
+	vi.stubEnv("NEON_PROFILE", "");
+});
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
 
 describe("auth", () => {
 	let configDir = "";
@@ -147,20 +166,20 @@ describe("ensureAuth", () => {
 		expect(props.apiKey).toEqual(expect.any(String));
 	});
 
-	test("should trigger auth flow when credentials.json is invalid", async ({
+	// Changed deliberately: an invalid credentials file used to be treated as absent, so this
+	// command would sign in over the top of it — overwriting a file the user might have wanted
+	// back, possibly as a different account. It now stops and says how to replace it.
+	test("should refuse and name the file when credentials.json is invalid", async ({
 		runMockServer,
 	}) => {
 		const server = await runMockServer("main");
-
-		// Write an empty credentials file
-		writeFileSync(join(configDir, "credentials.json"), "", { mode: 0o700 });
+		writeFileSync(join(configDir, "credentials.json"), "invalid json", {
+			mode: 0o700,
+		});
 
 		const props = setupTestProps(server);
-		await ensureAuth(props);
-
-		expect(authSpy).toHaveBeenCalledTimes(1);
-		expect(refreshTokenSpy).not.toHaveBeenCalled();
-		expect(props.apiKey).toEqual(expect.any(String));
+		await expect(ensureAuth(props)).rejects.toThrow(/not valid JSON/);
+		expect(authSpy).not.toHaveBeenCalled();
 	});
 
 	test("should try refresh when token is missing access_token but has refresh_token", async ({
@@ -269,7 +288,7 @@ describe("ensureAuth", () => {
 	});
 });
 
-describe("deleteCredentials", () => {
+describe("deleteCredentialsAt", () => {
 	let configDir = "";
 
 	beforeAll(() => {
@@ -286,7 +305,7 @@ describe("deleteCredentials", () => {
 
 		expect(existsSync(credentialsPath)).toBe(true);
 
-		deleteCredentials(configDir);
+		deleteCredentialsAt(credentialsPath);
 
 		expect(existsSync(credentialsPath)).toBe(false);
 	});
@@ -304,7 +323,7 @@ describe("deleteCredentials", () => {
 
 		// Should not throw an error
 		expect(() => {
-			deleteCredentials(nonExistentDir);
+			deleteCredentialsAt(credentialsPath);
 		}).not.toThrow();
 
 		rmSync(nonExistentDir, { recursive: true });

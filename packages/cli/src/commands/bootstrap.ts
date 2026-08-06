@@ -14,7 +14,7 @@ import {
 } from "neon-init/bootstrap";
 import prompts, { type InitialReturnValue } from "prompts";
 import type yargs from "yargs";
-
+import { credentialInputs } from "../_shared/auth_selection.js";
 import { isCi } from "../env.js";
 import { log } from "../log.js";
 import type { CommonProps } from "../types.js";
@@ -35,6 +35,9 @@ type BootstrapProps = CommonProps & {
 	install: boolean;
 	git: boolean;
 	link: boolean;
+	/** Forwarded to the re-exec'd `link`, so the child resolves the same account. */
+	configDir?: string;
+	profile?: string;
 };
 
 // ----------------------------------------------------------------------------
@@ -501,11 +504,31 @@ const runNeonLink = async (
 	targetDir: string,
 ): Promise<void> => {
 	const args = [process.argv[1], "link"];
-	if (props.apiKey) {
-		args.push("--api-key", props.apiKey);
+
+	// Forward how to authenticate, never the credential itself. A key on the child's argv is
+	// visible to anything that can list processes, and `runCommand` prints the whole argument
+	// list when the command fails — so a failed link would put the key in the log too.
+	// Forwarding the selection also keeps the child on the same account: without `--profile` it
+	// would resolve its own, and `--config-dir` was never forwarded at all.
+	if (props.configDir) {
+		args.push("--config-dir", props.configDir);
 	}
+	if (props.profile) {
+		args.push("--profile", props.profile);
+	}
+
 	args.push("--api-host", props.apiHost, "--output", props.output);
-	await runCommand(process.execPath, args, targetDir);
+
+	// An explicit `--api-key` has nowhere else to go — the child cannot re-resolve a flag we
+	// were given — so it travels in the environment, which neither `ps` nor our own logging
+	// exposes. A profile needs none of this; the child reads the credential itself.
+	const explicitKey = props.profile ? "" : credentialInputs().apiKeyFlag;
+	await runCommand(
+		process.execPath,
+		args,
+		targetDir,
+		explicitKey ? { NEON_API_KEY: explicitKey } : undefined,
+	);
 };
 
 const printScaffolded = (

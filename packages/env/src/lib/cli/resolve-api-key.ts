@@ -1,67 +1,134 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolveConfigFile } from "@neon/config/paths";
+import {
+	displacedProfileWarning,
+	selectCredential,
+} from "../../_shared/auth_selection.js";
+import {
+	inspectCredentials,
+	interpretCredentials,
+} from "../../_shared/credentials.js";
+import { configDir, resolveConfigFile } from "../../_shared/paths.js";
+import { DEFAULT_PROFILE, resolveProfile } from "../../_shared/profiles.js";
 
 /**
- * Resolve the Neon API key for a `neon-env` CLI invocation. Precedence (each wins over the
- * next): `--api-key` flag → `NEON_API_KEY` → `access_token` from the Neon CLI's
- * `credentials.json`, located by `@neon/config/paths`.
+ * Resolve the Neon API key for a `neon-env` CLI invocation.
  *
- * The CLI owns this resolution — `@neon/config` and `@neon/env` are deliberately
- * environment- and filesystem-agnostic and only ever accept an explicit `apiKey`, so the
- * ambient sources a *user* expects have to be read here. This mirrors `resolveContext`,
- * which does the same for project and branch.
+ * Precedence is the `neon` CLI's, from the same module: **an explicit flag beats an ambient
+ * environment variable.** `--api-key` and `--profile` together is an error; `--profile` beats
+ * `NEON_API_KEY`; `--api-key` beats `NEON_PROFILE`; two ambient sources resolve to the key.
  *
- * Returns `undefined` rather than throwing when nothing provides a key: the caller passes
- * it straight through, and the library raises the uniform `PLATFORM_MISSING_API_KEY` error.
+ * Sharing that decision rather than restating it is the point. An earlier version of this file
+ * checked `NEON_API_KEY` before the selected profile, so `NEON_API_KEY=… neon-env run --profile
+ * work` silently used the wrong account — the very bug this feature fixes in `neon`.
+ *
+ * The CLI owns the resolution because `@neon/config` and `@neon/env`'s root export are
+ * deliberately environment- and filesystem-agnostic: they accept an explicit `apiKey` and
+ * nothing else, so the ambient sources a *user* expects have to be read out here.
  */
 export function resolveApiKey(options: {
 	apiKey?: string;
+	profile?: string;
 	env?: NodeJS.ProcessEnv;
+	/** Where to say that an exported key displaced an exported profile. Defaults to stderr. */
+	warn?: (message: string) => void;
 }): string | undefined {
 	const env = options.env ?? process.env;
-	return (
-		nonEmpty(options.apiKey) ??
-		nonEmpty(env.NEON_API_KEY) ??
-		readStoredAccessToken(env)
-	);
+	const selection = selectCredential({
+		...(options.apiKey !== undefined ? { apiKeyFlag: options.apiKey } : {}),
+		...(options.profile !== undefined
+			? { profileFlag: options.profile }
+			: {}),
+		...(env.NEON_API_KEY !== undefined
+			? { apiKeyEnv: env.NEON_API_KEY }
+			: {}),
+		...(env.NEON_PROFILE !== undefined
+			? { profileEnv: env.NEON_PROFILE }
+			: {}),
+	});
+
+	// Sharing the decision is only half of it. The disclosure is the half that keeps a
+	// displaced profile from being the original bug in a quieter form: `NEON_API_KEY=…
+	// NEON_PROFILE=work neon-env run` legitimately uses the key, and saying nothing leaves the
+	// user believing they ran as `work`. `neon` has warned here from the start; this did not.
+	const displaced = displacedProfileWarning(selection);
+	if (displaced !== null) {
+		const warn =
+			options.warn ??
+			((message: string) => process.stderr.write(`${message}\n`));
+		warn(displaced);
+	}
+
+	if (selection.source !== "profile") return selection.apiKey;
+	return readStoredCredential(selection, env);
 }
 
 /**
- * Read `access_token` from the Neon CLI's credentials file.
+ * The credential stored for the selected profile.
  *
- * Location resolution is delegated to `@neon/config/paths` so this agrees with the `neon`
- * CLI itself — `NEON_CONFIG_DIR` / `NEONCTL_CONFIG_DIR`, else `$XDG_CONFIG_HOME/neon`, else
- * `~/.config/neon`, with an existing legacy `neonctl` directory still read. Rolling that
- * lookup by hand here is how the two drifted in the first place: this file honoured the env
- * var but not XDG, while the CLI honoured XDG but not the env var, so with
- * `XDG_CONFIG_HOME` set they disagreed about where credentials lived.
- *
- * Reads only `DEFAULT` — a profile is a CLI-invocation concept, and `neon-env` has no
- * `--profile` of its own to read one from.
- *
- * Never throws: a missing, unreadable, malformed, or token-less file is simply "no key",
- * so this can sit in a resolution chain without try/catch noise.
+ * Two different situations, deliberately not merged. A **missing** credential under `DEFAULT` is
+ * the ordinary not-signed-in state and resolves to no key; under a profile the user named it is
+ * an error, because reporting a missing credential would hide that the real problem is the name
+ * they typed. A **damaged** credential is always an error: the file is there, it is not an
+ * absence, and no amount of signing in elsewhere explains it.
  */
-function readStoredAccessToken(env: NodeJS.ProcessEnv): string | undefined {
-	const { path: credentialsPath } = resolveConfigFile("credentials.json", {
-		env,
-	});
-	if (!existsSync(credentialsPath)) return undefined;
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(readFileSync(credentialsPath, "utf-8"));
-	} catch {
+function readStoredCredential(
+	selection: { profile: string; explicit: boolean },
+	env: NodeJS.ProcessEnv,
+): string | undefined {
+	const { profile, explicit } = selection;
+	/**
+	 * An *absence* is only an error when the user named the profile. Not being signed in under
+	 * `DEFAULT` is the ordinary state, and the library's `PLATFORM_MISSING_API_KEY` says it
+	 * better than a stack trace.
+	 */
+	const absent = (reason: string): undefined => {
+		if (explicit) throw new Error(reason);
 		return undefined;
+	};
+
+	let path: string;
+	try {
+		path =
+			profile === DEFAULT_PROFILE
+				? // Per *file*, so an install predating the rename still finds its
+					// `credentials.json` in the legacy `neonctl` directory, in place.
+					resolveConfigFile("credentials.json", { env }).path
+				: // From the config root, not from wherever `credentials.json` happens to live:
+					// that file can still be in `neonctl/` while `profiles.json` is in `neon/`,
+					// and deriving one from the other loses every named profile.
+					resolveProfile(configDir({ env }), profile).credentialsPath;
+	} catch (err) {
+		// An unknown profile name is a naming error whoever typed it can fix, so it is fatal
+		// either way — it cannot be reported as "not signed in".
+		throw err instanceof Error ? err : new Error(String(err));
 	}
 
-	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-		return undefined;
-	return nonEmpty((parsed as Record<string, unknown>).access_token as string);
+	const read = inspectCredentials(path);
+	if (read.kind === "absent") {
+		return absent(
+			`Profile "${profile}" has no stored credential at ${path}. Sign in with \`neon profile create ${profile}\`.`,
+		);
+	}
+
+	// A file that exists but cannot be read is never an absence, named or not. Returning
+	// `undefined` here reported "no API key" for a credential that is present and broken,
+	// which sends the reader looking for a missing login instead of at the damaged file — and
+	// under `neon` the same file is a hard error, so the two CLIs disagreed about it.
+	if (read.kind === "unusable") {
+		throw new Error(
+			`${read.reason}. Replace it deliberately with \`neon profile create ${profile} --force\`, or delete the file.`,
+		);
+	}
+
+	const credential = interpretCredentials(read.credentials, {
+		path,
+		profile,
+	});
+	if (credential.kind === "api_key") return credential.apiKey;
+	const token = read.credentials.access_token;
+	if (typeof token === "string" && token.trim() !== "") return token.trim();
+	throw new Error(
+		`Profile "${profile}" holds a browser sign-in with no usable token at ${path}. Sign in again with \`neon auth --profile ${profile}\`.`,
+	);
 }
 
-function nonEmpty(value: string | undefined): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const trimmed = value.trim();
-	return trimmed === "" ? undefined : trimmed;
-}
+export { DEFAULT_PROFILE };

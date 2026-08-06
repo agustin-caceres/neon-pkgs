@@ -1,15 +1,30 @@
+import { recordCredentialInputs } from "../_shared/auth_selection.js";
+
 /**
  * Resolves `--api-key` from `NEON_API_KEY` when the flag is absent, leaving it an
  * empty string when neither is set.
  *
  * This cannot be expressed as the option's yargs `default`, because yargs prints
  * defaults in help output and would print the key itself.
+ *
+ * This is also the one place that reads the credential environment, and it records what it saw
+ * before folding anything together. Folding destroys the distinction the precedence rules turn
+ * on — `--api-key` outranks `--profile` and an exported `NEON_API_KEY` does not, but once both
+ * live in `args.apiKey` they are indistinguishable. The snapshot lives outside `args`
+ * deliberately: a hidden yargs option would be a second, undocumented way to pass a
+ * credential, and commands that call `.strict()` reject arguments the middleware invents.
  */
 export const resolveApiKeyFromEnv = (args: Record<string, unknown>) => {
-	if (typeof args.apiKey === "string" && args.apiKey !== "") {
+	const fromFlag = typeof args.apiKey === "string" ? args.apiKey : "";
+	const fromEnv = process.env.NEON_API_KEY ?? "";
+	recordCredentialInputs({
+		apiKeyFlag: fromFlag,
+		apiKeyEnv: fromEnv,
+		profileEnv: process.env.NEON_PROFILE ?? "",
+	});
+	if (fromFlag !== "") {
 		return;
 	}
-	const fromEnv = process.env.NEON_API_KEY ?? "";
 	args.apiKey = fromEnv;
 	args["api-key"] = fromEnv;
 };
