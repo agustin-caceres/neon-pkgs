@@ -593,6 +593,66 @@ $ neon bootstrap . --template hono
 
 The target directory must be empty unless you pass `--force` (a lone `.git` is ignored, so a freshly `git init`ed folder is fine). Symlinks and executable bits in the template are preserved.
 
+## Set up a project for your coding agent (`init`)
+
+`neon init` wires an existing project up to Neon: it signs you in, installs the Neon MCP server and agent skills into your editor, adds the Neon Local Connect extension for VS Code and Cursor, creates or picks a project, writes `DATABASE_URL` into `.env`, and offers to scaffold migrations.
+
+```bash
+$ neon init
+```
+
+Run in a terminal it prompts you through those steps. This is what the retired `neon-init` package used to do; `npx neon init` replaces it.
+
+Two side effects worth knowing before you run it. It **installs or upgrades `neonctl` globally**, with whichever package manager invoked it — the flow drives Neon by shelling out to the CLI rather than calling the API in-process. And it **writes `.neon`** in the project directory, the same context file `neon link` and `neon checkout` use.
+
+### Agent mode
+
+`--agent` turns the same flow into a state machine an AI coding assistant drives. It prints **one JSON object on stdout** and nothing else: a phase response carrying a `status` and a `nextAction` telling the agent what to do next — usually another `neon init` invocation, spelled out as a `command`. The two read-only steps, `status` and `finalize`, return a snapshot instead.
+
+```bash
+$ neon init --agent --data '{"step":"status"}'
+{
+  "auth": { "authenticated": true },
+  "tooling": { "mcpServer": { "configured": true, "scope": "global" }, "skills": { "installed": false, "scope": null } },
+  "project": { "databaseUrl": false },
+  "migrations": { "tool": "prisma", "hasMigrations": false },
+  "recommendations": [
+    { "priority": "high", "message": "No DATABASE_URL found in .env", "command": "neon init --agent --data '{\"step\":\"db\"}'" },
+    { "priority": "medium", "message": "Neon agent skills not detected in this project", "command": "neon init --agent --data '{\"step\":\"skills\",\"install\":true}'" },
+    { "priority": "medium", "message": "prisma detected but no migrations found", "command": "neon init --agent --data '{\"step\":\"migrations\"}'" }
+  ]
+}
+```
+
+`--agent` is implied when stdin is not a TTY and a known agent is detected from the environment (Claude Code, Codex, Cline, Cursor, VS Code, Windsurf).
+
+`--data` takes a JSON object whose `step` selects the phase: `auth`, `db`, `setup`, `getting-started`, `mcp`, `skills`, `migrations`, `neon-auth`, `status`, or `finalize`. Remaining keys are that phase's options. Without `--data`, the orchestrator picks the next phase itself. An unrecognised `step` is refused with the full list.
+
+**Failures are JSON too**, so an agent never has to distinguish "it broke" from "it returned nothing":
+
+```bash
+$ neon init --agent --data '{not json'
+{
+  "success": false,
+  "error": "Invalid JSON in --data flag at position 1. Expected a JSON object."
+}
+$ echo $?
+1
+```
+
+That message reports where parsing stopped and nothing more. `--data` carries whatever you put in it, and the JSON parser's own message quotes a window of the input, so echoing either would put a connection string or an API key on stdout.
+
+**One exception to "JSON on stdout".** Credentials are resolved before any command runs, so a failure in that step — an unknown `--profile` or `NEON_PROFILE`, `--api-key` and `--profile` together, or a `credentials.json` that cannot be read — prints `ERROR: …` on stderr, leaves stdout empty, and exits 1. Treat a non-zero exit with empty stdout as a credential problem and read stderr.
+
+| Option | |
+| --- | --- |
+| `--agent`, `-a` | Emit the JSON state machine instead of prompting |
+| `--data <json>` | Route to one phase, with that phase's options |
+| `--skip-migrations` | Leave the migrations phase out of the flow |
+| `--preview` | Enable preview features (scaffolding a project from a template) |
+
+`neon init` refuses `--profile`; see [Which credential an invocation uses](#which-credential-an-invocation-uses).
+
 ## Snapshots (`snapshots`)
 
 `neon snapshots` (alias `neon snapshot`) manages **snapshots** — point-in-time backups of a branch that you can list, rename, expire, restore into a branch, or schedule automatically. Snapshots are a Beta Neon feature and were previously only available in the Console and REST API; this command group brings them to the CLI.
@@ -776,7 +836,7 @@ When both are only environment variables the key wins, which keeps a CI pipeline
 
 `neon auth` and the `profile` subcommands are outside all of this, because they read the same flags to mean something else: `neon auth --profile work` names where to write a credential, and `neon profile create work --api-key …` names one to store.
 
-`neon init` does not support `--profile` yet. It hands its whole auth flow to `neon-init`, which reads the default credentials directly, so passing the flag fails instead of quietly running as the default account.
+`neon init` does not support `--profile` yet. It runs its own auth flow, which reads the default credentials directly and re-invokes the CLI as a subprocess without passing a profile down, so passing the flag fails instead of quietly running as the default account. `--api-key` and `NEON_API_KEY` reach `neon init` no better and are **not** refused. The flow reads the stored credential and nothing else, so a supplied key is ignored: with a credential on disk `neon init` runs silently as *that* account, and with none it sends you to a browser sign-in. The silent case is the one to watch — it is the same failure `--profile` is refused for, without the refusal. Until that is fixed, sign in as the account you want first, or use another command.
 
 ## API keys (`api-keys`)
 
@@ -876,6 +936,7 @@ API keys in org-7
 | config                                                                     | `init`, `status`, `plan`, `apply`                                                                            | Drive a branch from `neon.ts`      |
 | deploy                                                                     |                                                                                                              | Alias for `config apply`           |
 | bootstrap                                                                  |                                                                                                              | Scaffold a project from a template |
+| init                                                                       |                                                                                                              | Set up a project for a coding agent |
 | bucket                                                                     | `create`, `list`, `delete`, `object list`, `object get`, `object put`, `object delete` (incl. `--recursive`) | Manage buckets and their objects   |
 | [completion](https://neon.com/docs/reference/cli-completion)               |                                                                                                              | Generate a completion script       |
 
