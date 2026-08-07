@@ -1,7 +1,7 @@
 import { Analytics, type TrackParams } from "@segment/analytics-node";
-import { inspectCredentials } from "./_shared/credentials.js";
+import { inspectCredentials, OAUTH } from "./_shared/credentials.js";
 import { getApiClient, isNeonApiError } from "./api.js";
-import { getAuthContext } from "./auth_context.js";
+import { type AuthContext, getAuthContext } from "./auth_context.js";
 import { credentialsPath } from "./config.js";
 import { isCurrentBranchProbe } from "./context.js";
 import { getGithubEnvVars, isCi } from "./env.js";
@@ -18,6 +18,89 @@ const WRITE_KEY = "3SQXn5ejjXWLEJ8xU2PRYhAotLtTaeeV";
  */
 const hasCurrentBranchArgv = (): boolean =>
 	process.argv.includes("--current-branch");
+
+const ANONYMOUS = "anonymous";
+
+/**
+ * Who to attribute an event to, given whatever identified this invocation.
+ *
+ * Nothing is guaranteed to have identified it: a command can run with no credentials at all,
+ * leaving the id empty. Segment accepts an empty `userId` and forwards it as-is rather than
+ * rejecting it, so the substitution has to happen here. `""` is falsy but not nullish, which
+ * is why the fallback has to be `||`.
+ *
+ * Exported for tests.
+ */
+export const analyticsUserId = (userId: string | undefined): string =>
+	userId || ANONYMOUS;
+
+/**
+ * The account fields of `cli_command_success`, produced here and read in `index.ts`.
+ */
+export type EventAttribution = {
+	accountId?: string;
+	authMethod?: string;
+};
+
+/**
+ * The account an invocation that presented no API key may claim, which is nothing at all
+ * unless stored credentials named a user.
+ *
+ * Both fields are omitted together. An empty account reported under a named method describes
+ * an authentication that did not happen, which is worse than reporting neither.
+ *
+ * Exported for tests.
+ */
+export const storedCredentialAttribution = (
+	storedUserId: string | undefined,
+): EventAttribution =>
+	storedUserId ? { accountId: storedUserId, authMethod: OAUTH } : {};
+
+/** A key to ask the API about, a file to read an id out of, or both. */
+export type TelemetryCredential = {
+	apiKey?: string;
+	credentialsPath?: string;
+};
+
+/**
+ * Which credential telemetry may describe this invocation with.
+ *
+ * `ensureAuth` records a context only when it selected a credential for this invocation, so a
+ * missing context means the global auth middleware selected nothing before this ran. A key
+ * sitting in `args.apiKey` is then not the credential the middleware chose — `neon profile list`
+ * never used it — and must not be queried on its behalf, which would attribute the run to an
+ * account it never authenticated as and add a telemetry-only API call. The local default is the
+ * guess.
+ *
+ * The boundary is deliberately the credential the middleware selected, not every key a handler
+ * may go on to use. Several `profile` subcommands authenticate inside their own handlers —
+ * `create --api-key` verifies the key it is about to store, `rotate-key` mints and revokes — and
+ * those runs are attributed to the local default rather than to the account the handler talked
+ * to. Attributing them to that key puts an `identify` for the signed-in user beside an
+ * `accountId` for a different account.
+ *
+ * A selected key records no file, because it authenticates as its own account rather than out
+ * of one. Reading `DEFAULT` for it would identify the run as whoever is signed in locally, and
+ * that borrowed id would suppress the API lookup that names the key's real owner.
+ *
+ * Exported for tests.
+ */
+export const telemetryCredential = (
+	authContext: AuthContext | null,
+	apiKey: string | undefined,
+	defaultCredentialsPath: string,
+): TelemetryCredential => {
+	if (authContext === null) {
+		return { credentialsPath: defaultCredentialsPath };
+	}
+	if (authContext.source === "api-key") {
+		return { apiKey };
+	}
+	return {
+		apiKey,
+		credentialsPath: authContext.credentialsPath ?? defaultCredentialsPath,
+	};
+};
 
 let client: Analytics | undefined;
 let clientInitialized = false;
@@ -71,7 +154,7 @@ export const initAnalyticsClientMiddleware = (
 	});
 	log.debug("Initialized CLI analytics client");
 	client.identify({
-		userId: "anonymous",
+		userId: ANONYMOUS,
 	});
 };
 
@@ -94,30 +177,34 @@ export const analyticsMiddleware = async (args: {
 		return;
 	}
 
-	// Read the credentials this invocation actually authenticated with, which `ensureAuth`
-	// recorded. Reading `DEFAULT`'s unconditionally attributed every `--profile`-selected
-	// command to whichever account happened to be the default one.
-	const authenticatedAs =
-		getAuthContext()?.credentialsPath ?? credentialsPath(args.configDir);
-	// Telemetry must never turn a damaged or unreadable credentials file into a failed command.
-	try {
-		const read = inspectCredentials(authenticatedAs);
-		if (
-			read.kind === "ok" &&
-			typeof read.credentials.user_id === "string"
-		) {
-			userId = read.credentials.user_id;
-		} else if (read.kind !== "ok") {
-			log.debug("No usable credentials at %s", authenticatedAs);
+	const { apiKey: keyToQuery, credentialsPath: fileToRead } =
+		telemetryCredential(
+			getAuthContext(),
+			args.apiKey,
+			credentialsPath(args.configDir),
+		);
+
+	if (fileToRead !== undefined) {
+		// Telemetry must never turn a damaged or unreadable credentials file into a failed command.
+		try {
+			const read = inspectCredentials(fileToRead);
+			if (
+				read.kind === "ok" &&
+				typeof read.credentials.user_id === "string"
+			) {
+				userId = read.credentials.user_id;
+			} else if (read.kind !== "ok") {
+				log.debug("No usable credentials at %s", fileToRead);
+			}
+		} catch (err) {
+			log.debug("Could not read %s: %s", fileToRead, err);
 		}
-	} catch (err) {
-		log.debug("Could not read %s: %s", authenticatedAs, err);
 	}
 
 	try {
-		if (args.apiKey) {
+		if (keyToQuery) {
 			const apiClient = getApiClient({
-				apiKey: args.apiKey,
+				apiKey: keyToQuery,
 				apiHost: args.apiHost,
 			});
 
@@ -134,19 +221,21 @@ export const analyticsMiddleware = async (args: {
 				userId = resp?.data?.id;
 			}
 		} else {
-			args.accountId = userId;
-			args.authMethod = "oauth";
+			const { accountId, authMethod } =
+				storedCredentialAttribution(userId);
+			args.accountId = accountId;
+			args.authMethod = authMethod;
 		}
 	} catch (err) {
 		log.debug("Failed to get user id from api", err);
 	}
 
 	client.identify({
-		userId: userId?.toString() ?? "anonymous",
+		userId: analyticsUserId(userId),
 	});
 
 	client.track({
-		userId: userId || "anonymous",
+		userId: analyticsUserId(userId),
 		event: "CLI Started",
 		properties: getAnalyticsEventProperties(args),
 		context: {
@@ -195,7 +284,7 @@ export const sendError = (err: Error, errCode: ErrorCode) => {
 	}
 	client.track({
 		event: "CLI Error",
-		userId: userId || "anonymous",
+		userId: analyticsUserId(userId),
 		properties: getErrorAnalyticsEventProperties(
 			err,
 			errCode,
@@ -214,7 +303,7 @@ export const trackEvent = (
 	}
 	client.track({
 		event,
-		userId: userId || "anonymous",
+		userId: analyticsUserId(userId),
 		properties,
 	});
 	log.debug("Sent CLI event: %s", event);
