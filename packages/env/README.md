@@ -55,7 +55,7 @@ Both return the same namespaced `NeonEnv` shape: `postgres` is always present; `
 | Function | Description |
 | --- | --- |
 | `fetchEnv(config, { projectId, branch, ... })` | Async. Calls the Neon API for the given project + branch and returns live connection strings (and Auth/Data API values when enabled). `projectId` and `branch` are required; `branch` accepts a branch **name** (e.g. `main`) or a `br-…` id. (The legacy id-only `branchId` option still works.) Pass `keys` to fetch only some vars — see [Fetching a subset](#fetching-a-subset). Reads nothing from `process.env` or disk. |
-| `fetchEnvReusingSecrets(config, { projectId, branch, env })` | Async, from **`@neon/env/runtime`**. `fetchEnv` plus reuse of one-time secrets you already hold: verifies them against the branch, keeps what's valid, mints and revokes only when it must. Returns `{ vars, credential }`. Use this rather than `fetchEnv` anywhere the same branch is resolved repeatedly — see [The branch credential](#the-branch-credential). |
+| `fetchEnvReusingSecrets(config, { projectId, branch, env })` | Async, from **`@neon/env/runtime`**. `fetchEnv` plus reuse of one-time secrets you already hold: verifies them against the branch, keeps what's valid, mints and revokes only when it must. Returns `{ vars, credential }`. Takes an optional `revokeSuperseded`, which keeps the replaced credential live when your call resolves only part of the branch. Use this rather than `fetchEnv` anywhere the same branch is resolved repeatedly — see [The branch credential](#the-branch-credential). |
 | `parseEnv(config)` / `parseEnv(config, slug)` / `parseEnv(config, keys)` | Sync. Reads/validates the Neon env vars already present in `process.env` against the static policy toggles. With a function `slug`, also returns a typed `function` namespace of that function's declared env keys. With a `keys` array (e.g. `["DATABASE_URL"]`), only those vars are required and returned, as a narrowed namespaced shape — the keys are typesafe against the policy. Throws `PlatformError(EnvNotInjected)` listing missing vars when the env isn't populated. |
 | `toEntries(env)` | Project a resolved `NeonEnv` into `{ KEY: value }` pairs for cross-process transport (named after the web `.entries()` convention; returns a `Record`). |
 
@@ -149,13 +149,16 @@ const { vars, credential } = await fetchEnvReusingSecrets(config, {
 // vars: { DATABASE_URL: "…", AWS_ACCESS_KEY_ID: "…", … } — ready to write or inject
 if (credential.issued) {
     console.log(`new values for ${credential.keys.join(", ")}`);
-    // credential.revoked holds the token ids it superseded
+    // credential.revoked    — ids it replaced and revoked
+    // credential.superseded — ids it replaced but left live (`revokeSuperseded: false`)
 }
 ```
 
 The check is a real verification, not a presence test. A persisted secret is kept only when it names a credential that still exists on the branch, isn't revoked or expired, and carries every scope the policy needs. A `.env.example` placeholder, a credential revoked in the console, one copied from another branch, or one predating a newly-enabled feature all fail that check and get replaced — and the credential being replaced is revoked, so a branch doesn't accumulate one per call.
 
 No local bookkeeping backs this: `AWS_ACCESS_KEY_ID` **is** the credential's token id, and the AI Gateway token is minted as `nt_live_<tokenIdShort>_<secret>`, so the persisted secrets already name the credential that issued them.
+
+Revoking is only safe because the call resolves everything the policy enables. Pass `revokeSuperseded: false` when yours resolves a **subset** — the credential your persisted secrets name may also back a service you are not resolving, and revoking it would break that service while its vars, which you are not rewriting, stay in place. The cost is an orphaned credential, which is the safer of the two failures, and `credential.superseded` names it so you can report it rather than leave it invisible. `neon env pull --service` is the caller this exists for.
 
 ### Fetching a subset
 

@@ -417,9 +417,15 @@ The human-readable summary line goes to stderr and the diff body to stdout, so `
 
 ### env pull
 
-`env pull` writes the linked branch's Neon environment variables into a local dotenv file: an existing `.env` if you have one, otherwise `.env.local` (override with `--file <path>`). Only Neon-managed keys (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, and the Neon Auth / Data API URLs when those services are enabled) are written; any other lines in the file are preserved. The branch comes from the closest `.neon` file, so no `--branch` is needed (pass `--branch <id|name>` to target another branch).
+`env pull` writes the linked branch's Neon environment variables into a local dotenv file: an existing `.env` if you have one, otherwise `.env.local` (override with `--file <path>`). Only Neon-managed keys are written (see the table below); any other lines in the file are preserved. The branch comes from the closest `.neon` file, so no `--branch` is needed (pass `--branch <id|name>` to target another branch).
 
-`link` and `checkout` invoke `env pull` automatically (see above), so you usually only run it by hand to refresh vars or to pull a different branch into a specific file:
+**What gets pulled**, in precedence order:
+
+1. **`--service`**, when you pass it — exactly those services, whatever else is on the branch and whatever a `neon.ts` says.
+2. **`neon.ts`**, when the working directory has one — the policy is the source of truth, same as `neon dev` and `neon deploy`.
+3. **Everything the branch has** otherwise — Postgres, Neon Auth, the Data API, and object storage read back from the branch, plus the AI Gateway. The gateway has no branch-level state to read back (it is credential-gated, not provisioned), so a bare `env pull` asks for it rather than detecting it, which mints a branch credential. To leave it out, name the services you do want with `--service`.
+
+If the gateway can't be resolved, it is dropped with a warning and the rest of the pull still lands. Gateway variables already in your file for *this* branch are left alone — a pull that couldn't reach the gateway is no evidence the branch has stopped having one — while ones left over from a different branch are pruned like any other stale value.
 
 ```bash
 # Refresh the linked branch's vars in place
@@ -427,9 +433,44 @@ neon env pull
 
 # Pull a specific branch into a specific file
 neon env pull --branch preview --file .env.preview
+
+# Only the AI Gateway
+neon env pull --service ai-gateway
+
+# Repeat the flag or comma-separate; -s, --service and --services are all accepted
+neon env pull -s postgres -s data-api
+neon env pull -s postgres,auth
 ```
 
+Every services flag in the CLI takes those three spellings, the same value syntax, and the same service names — see [`config init --services`](#getting-a-neonts-config-init).
+
+| `--service` | Variables |
+| --- | --- |
+| `postgres` | `DATABASE_URL`, `DATABASE_URL_UNPOOLED` |
+| `auth` | `NEON_AUTH_BASE_URL`, `NEON_AUTH_JWKS_URL` |
+| `data-api` | `NEON_DATA_API_URL` |
+| `object-storage` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION` |
+| `ai-gateway` | `NEON_AI_GATEWAY_TOKEN`, `NEON_AI_GATEWAY_BASE_URL` |
+
+`NEON_BRANCH` is written by every pull — it is branch identity, not a service.
+
+**A scoped pull is scoped in both directions.** An unscoped `env pull` owns the Neon-named variables: pointing a directory at a branch without Neon Auth prunes the stale `NEON_AUTH_*` lines. `--service` narrows that to the services you named, so `env pull -s ai-gateway` never touches your `DATABASE_URL`. (`AWS_*` is never pruned by any pull: those names collide with credentials you may set yourself, so `env pull` only ever writes them.)
+
+**A scoped pull also never revokes a credential.** Where an unscoped pull revokes the credential it replaces, a scoped one leaves the old one live — it can't tell which other services still use it. It says so when it happens; revoke it in the Neon Console if nothing does.
+
+Naming a service the branch does not have is an error, not an empty pull:
+
+```
+--service auth: branch br-snowy-frost-12345 has no Neon Auth integration, so there are no
+auth env vars to pull. Provision it first (`neon deploy`, `neon config apply`, or the Neon
+Console), or drop auth from --service.
+```
+
+`link`, `checkout`, and `config apply` invoke `env pull` automatically (see above). Those bundled pulls follow rules 2 and 3 above **without** the implied AI Gateway: minting a credential for a service you never named isn't something a side effect of another command should do. Run `neon env pull` to get it.
+
 If you'd rather not keep env vars on disk, inject them at runtime instead with `neon-env run -- <your dev command>` (from `@neon/env`) or `neon dev`, and pass `--no-env-pull` to `link` / `checkout`.
+
+**`neon dev` resolves the same set, by the same rules** — including the AI Gateway on a branch with no `neon.ts`. A function running locally gets what the deployed runtime would inject into it, which is the whole point of `dev`; a handler that reads `NEON_AI_GATEWAY_BASE_URL` should not work in production and fail on your machine. `dev` writes nothing, but it does *read* your `.env` / `.env.local` to reuse the branch credential behind the AI Gateway and object storage. Without a file to read from it issues one on every start and leaves the last one live — it has nowhere to keep it, and so cannot name it to revoke it. It says so when it happens; run `env pull` (or just `link` / `checkout`) once and restarts reuse the credential instead.
 
 **Where `.neon` lives**: `link` writes `.neon` into the **current working directory** by default. If an existing `.neon` is found in any parent directory, that file is reused — so commands run from a sub-directory of a linked project still pick up the project's context. To pin the location explicitly, pass `--context-file <path>`.
 
@@ -479,7 +520,10 @@ Selecting nothing is a valid answer: you get the starter policy, which is also w
 neon config init
 
 # Declare services with no prompt
-neon config init --services auth,functions,storage,ai-gateway
+neon config init --services auth,functions,object-storage,ai-gateway
+
+# Repeat the flag instead, and shorten it — every services flag takes all three spellings
+neon config init -s auth -s functions
 
 # Explicitly ask for the bare starter policy
 neon config init --services none
@@ -487,6 +531,8 @@ neon config init --services none
 # Scaffold but print the install command instead of running it
 neon config init --no-install
 ```
+
+Object storage is spelled `object-storage` here, matching [`env pull --service`](#env-pull) and the rest of the CLI. The old `storage` still works and warns; it will be removed.
 
 Choosing **Functions** also writes the handler the policy points at, since `source` is only resolved when `apply` bundles it — a declared function with no file on disk fails at deploy:
 
