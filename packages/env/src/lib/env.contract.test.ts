@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import { defineConfig } from "@neon/config/v1";
-import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
 	NEON_ENV_VAR_KEYS,
 	type NeonEnv,
 	toEntries,
-} from "../_shared/env-core/env.js";
+} from "@neon-internals/env-core/env";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { parseEnv } from "./parse-env.js";
 import { stubCleanNeonEnv } from "./test-utils.js";
 
@@ -213,7 +213,7 @@ describe("@neon/env public surface", () => {
 
 	test("the package stays pure — no stateful helper leaks into it", async () => {
 		// `fetchEnvReusingSecrets` reads an env source and can mint and revoke credentials. It
-		// is shared implementation with the `neon` CLI (`shared/env-core`), not something to
+		// is shared implementation with the `neon` CLI (`@neon-internals/env-core`), not something to
 		// hand an application: a library that revokes credentials because you imported it is a
 		// library you cannot safely embed. It has no entry point of its own any more, and must
 		// not reappear on this one.

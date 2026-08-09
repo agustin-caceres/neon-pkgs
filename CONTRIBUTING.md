@@ -49,6 +49,14 @@ pnpm --filter @neon/env build
 pnpm --filter @neon/env test:ci
 ```
 
+## What is where
+
+| Directory | Holds |
+| --- | --- |
+| `packages/` | Everything published to npm, one directory per package |
+| `internals/` | `@neon-internals/*` — private, never published, bundled into the packages that use them. Currently the credential and env-resolution code shared by the `neon` CLI and `@neon/env`; each has its own README |
+| `tests/` | Test-only workspace packages, currently the live e2e harness |
+
 See [`AGENTS.md`](./AGENTS.md) for the deeper architecture and per-package notes (especially the
 CLI package, which keeps its own toolchain).
 
@@ -57,7 +65,7 @@ package's file before changing it:
 
 | Package | Notes |
 | --- | --- |
-| [`@neon/env`](./packages/env/CONTRIBUTING.md) | Why the credential-reuse half lives in `shared/env-core` rather than on the published surface, and the branch-credential rules |
+| [`@neon/env`](./packages/env/CONTRIBUTING.md) | Why the credential-reuse half lives in `internals/env-core` rather than on the published surface, and the branch-credential rules |
 
 ## Testing
 
