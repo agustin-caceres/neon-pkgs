@@ -14,6 +14,14 @@ vi.mock("execa", () => ({
 	execa: (...args: unknown[]) => mockExeca(...args),
 }));
 
+const mockInstallMcp = vi.fn().mockReturnValue({
+	ok: true,
+	path: "/tmp/mcp.json",
+});
+vi.mock("../install_mcp.js", () => ({
+	installNeonMcpServer: (...args: unknown[]) => mockInstallMcp(...args),
+}));
+
 vi.mock("../inspect.js", () => ({
 	inspectProject: vi.fn().mockResolvedValue({
 		connectionString: false,
@@ -85,6 +93,10 @@ describe("setup phase", () => {
 			version: "2.23.1",
 		});
 		mockExeca.mockReset().mockResolvedValue({ stdout: "", stderr: "" });
+		mockInstallMcp.mockReset().mockReturnValue({
+			ok: true,
+			path: "/tmp/mcp.json",
+		});
 		mockEnsureSkills.mockReset().mockResolvedValue(true);
 		mockFindEditorCommand.mockReset().mockResolvedValue("/usr/bin/cursor");
 		mockFetch.mockReset().mockResolvedValue({
@@ -100,6 +112,19 @@ describe("setup phase", () => {
 			body: "mock-stream",
 		});
 	});
+	test("reportBack omits project mcpScope when the agent cannot write it", async () => {
+		const result = await handleSetupPhase({ agent: "windsurf" });
+
+		expect(result.nextAction.type).toBe("agent_check");
+		if (result.nextAction.type === "agent_check") {
+			const dataPlaceholder = result.nextAction.reportBack.args.find(
+				(a: string) => a.includes("json:"),
+			);
+			expect(dataPlaceholder).toContain("mcpScope?: 'global'|'none'");
+			expect(dataPlaceholder).not.toContain("'project'");
+		}
+	});
+
 	test("returns inspection checks with phased userPreferences and instructions", async () => {
 		const result = await handleSetupPhase({ agent: "claude" });
 
@@ -220,15 +245,18 @@ describe("setup phase", () => {
 		const args = (result.nextAction as { args: string[] }).args;
 		expect(args[0]).toBe("getting-started");
 
-		// Should have called execa for MCP only (neon CLI mocked, skills via ensureSkillsUpToDate)
-		expect(mockExeca).toHaveBeenCalledTimes(1);
 		expect(mockEnsureSkills).toHaveBeenCalled();
-
-		// MCP call should use -g for global scope
-		const mcpCall = mockExeca.mock.calls[0];
-		expect(mcpCall[0]).toBe("npx");
-		expect(mcpCall[1]).toContain("-g");
-		expect(mcpCall[1]).toContain("add-mcp");
+		expect(mockInstallMcp).toHaveBeenCalledWith(
+			expect.objectContaining({
+				agent: "vscode",
+				scope: "global",
+			}),
+		);
+		expect(
+			mockExeca.mock.calls.some((call) =>
+				String(call[1] ?? "").includes("add-mcp"),
+			),
+		).toBe(false);
 	});
 
 	test("defaults mode skips MCP when already configured", async () => {
@@ -402,11 +430,11 @@ describe("setup phase", () => {
 		// Extension should NOT be installed since installExtension=false
 		expect(resultIds).not.toContain("install_extension");
 
-		// MCP should be project scope (no -g flag)
-		const mcpCall = mockExeca.mock.calls.find((call) =>
-			call[1]?.includes("add-mcp"),
+		expect(mockInstallMcp).toHaveBeenCalledWith(
+			expect.objectContaining({
+				scope: "project",
+			}),
 		);
-		expect(mcpCall?.[1]).not.toContain("-g");
 	});
 
 	test("--data with customize mode goes straight to execution", async () => {
@@ -440,11 +468,56 @@ describe("setup phase", () => {
 		expect(result.phase).toBe("setup");
 		expect(result.status).toBe("installed");
 
-		// MCP call should not include -g for project scope
-		const mcpCall = mockExeca.mock.calls.find((call) =>
-			call[1]?.includes("add-mcp"),
+		expect(mockInstallMcp).toHaveBeenCalledWith(
+			expect.objectContaining({
+				scope: "project",
+			}),
 		);
-		expect(mcpCall?.[1]).not.toContain("-g");
+	});
+
+	test("omits project MCP scope when the agent has no project config", async () => {
+		const result = await handleSetupPhase({ agent: "windsurf" });
+
+		expect(result.nextAction.type).toBe("agent_check");
+		if (result.nextAction.type === "agent_check") {
+			const mcpScopePref = result.nextAction.userPreferences?.find(
+				(p) => p.id === "mcpScope",
+			);
+			const values = (mcpScopePref?.options ?? []).map((option) =>
+				typeof option === "string" ? option : option.value,
+			);
+			expect(values).toContain("global");
+			expect(values).not.toContain("project");
+		}
+	});
+
+	test("project-scope MCP for an agent without project config is not success", async () => {
+		mockInstallMcp.mockReturnValue({
+			ok: false,
+			unsupported: true,
+			error: "Windsurf does not support project-level MCP config.",
+		});
+
+		const result = await handleSetupPhase({
+			agent: "windsurf",
+			mcpConfigured: false,
+			connectionString: false,
+			framework: "none",
+			orm: "none",
+			isVscodeIde: false,
+			mode: "customize",
+			mcpScope: "project",
+		});
+
+		expect(result.status).toBe("partial");
+		const results = result.results as {
+			id: string;
+			status: string;
+			error?: string;
+		}[];
+		expect(results.find((r) => r.id === "install_mcp")?.status).toBe(
+			"failed",
+		);
 	});
 
 	test("reports partial status when some installs fail", async () => {

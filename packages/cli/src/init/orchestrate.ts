@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { supportsSkills, tryResolveAddMcpAgentId } from "./agents.js";
 import { isAuthenticated } from "./auth.js";
 import { inspectProject } from "./inspect.js";
 import { handleAuthPhase } from "./phases/auth.js";
@@ -8,6 +9,11 @@ import { handleMigrationsPhase } from "./phases/migrations.js";
 import { handleNeonAuthPhase } from "./phases/neon_auth.js";
 import { handleSetupPhase } from "./phases/setup.js";
 import { resolveNeonContext } from "./resolve_context.js";
+import {
+	getSkillList,
+	missingSkillsForAgent,
+	skillsInstalledForAgent,
+} from "./skills.js";
 import type { PhaseResponse } from "./types.js";
 
 export type OrchestratorOptions = {
@@ -58,10 +64,31 @@ export async function orchestrate(
 	// Only detect empty projects when --preview is enabled
 	const hasApp = options.preview ? inspection.hasApp === true : true;
 
+	const requestedAgent = options.agent
+		? tryResolveAddMcpAgentId(options.agent)
+		: undefined;
+
 	// When preview is enabled, check that all preview skills are installed too
 	let skillsInstalled = inspection.skillsInstalled;
-	if (options.preview && skillsInstalled && inspection.skillsScope) {
-		const { getSkillList } = await import("./skills.js");
+	if (options.preview && requestedAgent && supportsSkills(requestedAgent)) {
+		const missing = missingSkillsForAgent(requestedAgent, {
+			cwd,
+			preview: true,
+		});
+		const required = getSkillList(true);
+		if (missing.length > 0) {
+			skillsInstalled = false;
+			if (missing.length < required.length) {
+				const baseScope =
+					inspection.skillsScope &&
+					!String(inspection.skillsScope).includes("partial")
+						? inspection.skillsScope
+						: "project";
+				inspection.skillsScope =
+					`${baseScope}-partial` as typeof inspection.skillsScope;
+			}
+		}
+	} else if (options.preview && skillsInstalled && inspection.skillsScope) {
 		const previewSkills = getSkillList(true);
 		const { existsSync: exists } = await import("node:fs");
 		const { resolve: resolvePath } = await import("node:path");
@@ -90,7 +117,18 @@ export async function orchestrate(
 		}
 	}
 
-	const toolingInstalled = inspection.mcpConfigured && skillsInstalled;
+	const mcpForThisAgent = requestedAgent
+		? (inspection.mcpAgents ?? []).some(
+				(hit) => hit.agent === requestedAgent,
+			)
+		: inspection.mcpConfigured === true;
+	const skillsReady =
+		requestedAgent && !supportsSkills(requestedAgent)
+			? true
+			: requestedAgent
+				? skillsInstalledForAgent(requestedAgent, cwd, options.preview)
+				: skillsInstalled === true;
+	const toolingInstalled = mcpForThisAgent && skillsReady;
 	const hasNeonConnection = inspection.connectionString === true;
 
 	// Phase 3a: No app or tooling not installed → setup flow
@@ -102,9 +140,13 @@ export async function orchestrate(
 			agent: options.agent,
 			preview: options.preview,
 			hasApp,
-			mcpConfigured: inspection.mcpConfigured ?? null,
+			mcpConfigured: requestedAgent
+				? mcpForThisAgent
+				: (inspection.mcpConfigured ?? null),
 			mcpScope: inspection.mcpScope || undefined,
-			skillsInstalled: skillsInstalled ?? null,
+			skillsInstalled: requestedAgent
+				? skillsReady
+				: (skillsInstalled ?? null),
 			skillsScope: inspection.skillsScope || undefined,
 		});
 	}
@@ -180,7 +222,9 @@ export async function orchestrate(
 		nextAction: {
 			type: "complete",
 			message:
-				"Neon setup is complete. Your database is configured and your agent has the Neon MCP server and skills available.",
+				requestedAgent && !supportsSkills(requestedAgent)
+					? "Neon setup is complete. Your database is configured and your agent has the Neon MCP server available."
+					: "Neon setup is complete. Your database is configured and your agent has the Neon MCP server and skills available.",
 		},
 	};
 }
