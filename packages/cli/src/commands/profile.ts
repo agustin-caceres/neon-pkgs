@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { basename } from "node:path";
+import { isAbsolute, relative } from "node:path";
 import { credentialInputs } from "@neon-internals/cli-core/auth_selection";
 import {
 	CRED_STORAGE_FILE,
@@ -39,6 +39,7 @@ import {
 	newProfileLocation,
 	profilesFilePath,
 	profilesUsingPath,
+	type ResolvedProfile,
 	readProfiles,
 	resolveProfile,
 	selectProfileName,
@@ -379,43 +380,35 @@ const list = async (props: ProfileProps) => {
 			name: p.name,
 			account: p.label ?? p.userId ?? storedUserId ?? "-",
 			auth,
-			// Only a key carries a scope. An OAuth session reaches whatever its account does.
 			scope:
-				stored !== null && auth === "api key"
-					? describeScope(scopeOf(stored))
-					: "-",
-			// Names what was actually checked. The column this replaced was called "available",
-			// which claims the credential is ready to use — a thing reading a file cannot show,
-			// and the wrong answer for the dead key someone runs this to diagnose.
+				auth === "oauth"
+					? describeScope({})
+					: stored !== null && auth === "api key"
+						? describeScope(scopeOf(stored))
+						: "-",
 			file,
 			storage,
-			// The basename in the table, because `cli-table` neither wraps nor truncates and a
-			// real path pushes the row past most terminals. Structured output keeps the path,
-			// which is what a script actually wants.
-			...(props.output === "table"
-				? {
-						credentials:
-							p.storage === "keyring"
-								? KEYRING_CREDENTIALS
-								: basename(p.credentialsPath),
-					}
-				: { credentials: credentialsDisplay(p) }),
+			credentials:
+				props.output === "table"
+					? credentialsListValue(p, props.configDir)
+					: credentialsDisplay(p),
 		};
 	});
 
 	writer(props).end(rows, {
 		title: "Profiles",
-		fields: [
-			"active",
-			"name",
-			"account",
-			"auth",
-			"scope",
-			"file",
-			"storage",
-			"credentials",
-		],
+		fields: ["active", "name", "account", "auth", "credentials", "scope"],
 	});
+};
+
+const credentialsListValue = (
+	profile: ResolvedProfile,
+	configDir: string,
+): string => {
+	if (profile.storage === "keyring") return KEYRING_CREDENTIALS;
+	const rel = relative(configDir, profile.credentialsPath);
+	if (rel.startsWith("..") || isAbsolute(rel)) return profile.credentialsPath;
+	return rel;
 };
 
 const locationForCreate = (
