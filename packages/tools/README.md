@@ -1,6 +1,6 @@
 # `@neon/tools`
 
-Generated agent tools for every operation in the Neon Management API. Select only the operations an agent needs, then use the canonical descriptors directly or adapt them for MCP, Eve, or Mastra.
+Agent tools for the Neon Management API and for the `@neon/sdk` workflows that attach compute and return a connection string. Select only the operations and workflows an agent needs, then use the canonical descriptors directly or adapt them for MCP, Eve, and Mastra.
 
 ```bash
 npm install @neon/tools
@@ -48,9 +48,53 @@ await tools.listProjects.execute(
 );
 ```
 
-The returned record is keyed by OpenAPI operation ID. Each tool includes its generated Zod 4 `inputSchema`, snake-case `id`, title, description, safety annotations, stability metadata, and an `execute()` function. Inputs are flat: path, query, header, and body fields sit on one object. A body that is a single object wrapper is lifted, so `create_project` takes `{ name, region_id, org_id, ... }` rather than `{ project: { name } }`. A body with several properties keeps those properties, so `create_project_branch` takes `{ project_id, branch, endpoints, annotation_value }` and `branch` is still an object. Two email-provider updates keep a `body` field because the API request is a discriminated union.
+The returned record is keyed by OpenAPI operation ID or workflow id. Each tool includes its Zod 4 `inputSchema`, snake-case `id`, title, description, safety annotations, stability metadata, and an `execute()` function. Inputs are flat: path, query, header, and body fields sit on one object. A body that is a single object wrapper is lifted, so `create_project` takes `{ name, region_id, org_id, ... }` rather than `{ project: { name } }`. A body with several properties keeps those properties, so `create_project_branch` takes `{ project_id, branch, endpoints, annotation_value }` and `branch` is still an object. Two email-provider updates keep a `body` field because the API request is a discriminated union.
 
-`operationIds` exports every valid selector. `execute()` strictly validates the input, rejects unknown fields instead of dropping them, and returns typed, JSON-safe `{ data }`. Neon SDK errors remain typed and are thrown to the caller.
+`operationIds` exports every valid operation selector. `execute()` strictly validates the input, rejects unknown fields instead of dropping them, and returns typed, JSON-safe `{ data }`. Neon SDK errors remain typed and are thrown to the caller.
+
+## Workflows
+
+`workflows` selects methods from the `@neon/sdk` ergonomic client. These are not OpenAPI operations: they attach a default compute, wait until the resource is ready, and return a connection string. `operations` is the generated Management API. At least one of the two arrays is required.
+
+Both workflow tools poll until the resource is ready. The default deadline is five minutes (`wait.timeoutMs`). Pass `wait: { timeoutMs: 30_000 }` on `createNeonTools` or `createNeonTool` to bound that. Set it below the host's own tool-call timeout, otherwise the host gives up first. An abort `signal` on `execute` or a wait timeout stops the poll, not the create: the branch or project may already exist, and the error does not include its id. List before retrying. `metadata.method` and `metadata.path` name the first request; extra readiness GETs are not listed there. `inject.projectId` still works on `createBranchWithCompute` because its path is `/projects/{project_id}/branches`.
+
+```ts
+const tools = createNeonTools({
+	apiKey,
+	operations: ["listProjects"],
+	workflows: ["createBranchWithCompute", "createProjectAndConnect"],
+});
+
+const { data } = await tools.createBranchWithCompute.execute({
+	project_id: "project-id",
+	name: "feature-x",
+});
+
+await tools.createProjectAndConnect.execute({
+	name: "agent-project",
+	region_id: "aws-us-east-1",
+});
+```
+
+`createNeonTool` accepts the same workflow ids:
+
+```ts
+const createBranch = createNeonTool("createBranchWithCompute", { apiKey });
+```
+
+`workflowIds` lists the selectors. Record keys name the entity (`createBranchWithCompute`, `createProjectAndConnect`) and call `neon.branches.createWithCompute` and `neon.projects.createAndConnect`. Published ids are `create_branch_with_compute` and `create_project_and_connect`. Input fields are snake_case, same as generated tools. `names` can rename a workflow the same way it renames an operation:
+
+```ts
+const tools = createNeonTools({
+	apiKey,
+	workflows: ["createBranchWithCompute"],
+	names: { createBranchWithCompute: "create_branch" },
+});
+
+tools.createBranchWithCompute.id; // "create_branch"
+```
+
+`create_project_branch` still creates a branch with no compute when `endpoints` is omitted. It can attach compute if you pass `endpoints`; it does not wait or return a connection string. Use `createBranchWithCompute` when the next step needs to connect.
 
 ## Optional host add-ons
 
@@ -116,7 +160,7 @@ The record is still keyed by operation ID (`tools.createProjectBranch`). MCP and
 
 ### Project and branch injection
 
-Generated tools take path parameters as `project_id` and `branch_id`. A host that already knows those values can inject them. Without `omitFromSchema`, the published field becomes optional and a caller-supplied value wins. With `omitFromSchema: true`, the field is removed from the published schema and the injector is the only source:
+Tools take path parameters as `project_id` and `branch_id`. A host that already knows those values can inject them, including on `createBranchWithCompute`. Without `omitFromSchema`, the published field becomes optional and a caller-supplied value wins. With `omitFromSchema: true`, the field is removed from the published schema and the injector is the only source:
 
 ```ts
 const tools = createNeonTools({
@@ -152,7 +196,7 @@ await grant.run({ projectId: "project-id" }, () => tools.getProject.execute({}))
 
 Injectors only apply to tools that have that path key. `listProjects` is unchanged. Empty inject values fail closed. Invalid ids still fail the original path schema before fetch.
 
-These add-ons do not add host-only behavior such as returning a connection string from `createProject`. Grant filtering, read-only filtering, and access-control notices stay in the host.
+`onExecute` and `inject` apply to workflow tools the same way they apply to generated tools. Grant filtering, read-only filtering, and access-control notices stay in the host.
 
 Injection reads the URL template, so it fills path `project_id` and `branch_id` only. Query and body fields with those names stay caller-supplied, including `getConnectionURI.branch_id`, `createOrgApiKey.project_id`, `createNeonAuthIntegration.project_id` / `branch_id`, `createNeonAuthNewUser.project_id`, `createNeonAuthProviderSDKKeys.project_id`, `transferNeonAuthProviderProject.project_id`, `addProjectJWKS.branch_id`, `createProjectEndpoint.branch_id`, `updateProjectEndpoint.branch_id`, and `getProjectAdvisorSecurityIssues.branch_id`. `omitFromSchema: true` does not hide those fields.
 
