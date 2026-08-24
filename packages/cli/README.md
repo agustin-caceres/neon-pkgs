@@ -766,6 +766,15 @@ neon snapshots schedule set --branch main --schedule '[{"frequency":"weekly","da
 
 All sub-commands honor the [global options](#global-options), including `--output json|yaml|table`.
 
+## Database diagnostics (`inspect`)
+
+`neon inspect db stalled-queries` takes a read-only snapshot of active queries that have run for more than 30 seconds and groups parallel workers with their leader. Table output shows duration, wait event, blocking pids, role, query group, and query. `--output json` adds timestamps, query IDs, pids, database, and the rest of the row. A blocking pid can belong to an idle-in-transaction backend this command does not list; `neon inspect db locks` shows lock holders.
+
+```bash
+neon inspect db stalled-queries
+neon inspect db stalled-queries --output json
+```
+
 ## Logs (`logs`)
 
 `neon logs` reads the log records the services on a branch emit — Neon Functions, object storage, and Postgres computes. **Logs require Neon Platform Beta and are currently available only for projects in `aws-us-east-2`.**
@@ -1078,6 +1087,7 @@ Id   Name      Project         Created At            Last Used At          Last 
 | [roles](https://neon.com/docs/reference/cli-roles)                         | `list`, `create`, `delete`                                                                                   | Manage roles                       |
 | [operations](https://neon.com/docs/reference/cli-operations)               | `list`                                                                                                       | Manage operations                  |
 | logs                                                                       | `query`, `fields`, `field-values`                                                                            | Query branch logs (Beta)           |
+| inspect                                                                    | `db stalled-queries`                                                                                         | Inspect Postgres diagnostics       |
 | snapshots                                                                  | `list`, `get`, `create`, `update`, `delete`, `restore`, `finalize`, `schedule get`, `schedule set`           | Manage snapshots                   |
 | [connection-string](https://neon.com/docs/reference/cli-connection-string) |                                                                                                              | Get connection string              |
 | [psql](https://neon.com/docs/reference/cli-psql)                           |                                                                                                              | Connect to a database via psql     |
