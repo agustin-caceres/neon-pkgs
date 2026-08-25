@@ -5,6 +5,12 @@ import type yargs from "yargs";
 
 import { log } from "./log.js";
 
+export type ClaimableContext = {
+	version: 1;
+	/** Omits the `/v1` API prefix. */
+	origin: string;
+};
+
 export type Context = {
 	orgId?: string;
 	projectId?: string;
@@ -20,6 +26,7 @@ export type Context = {
 	 * dropped the next time the context is written.
 	 */
 	branchId?: string;
+	claimable?: ClaimableContext;
 };
 
 /**
@@ -82,6 +89,9 @@ export const isConfigInit = (args: {
  */
 export const isProfileCommand = (args: { _: (string | number)[] }): boolean =>
 	args._[0] === "profile" || args._[0] === "profiles";
+
+export const isClaimCommand = (args: { _: (string | number)[] }): boolean =>
+	args._[0] === "claim" || args._[0] === "claimable";
 
 /**
  * `neon api-keys …`, under either spelling. Exempts the group from context enrichment: how
@@ -228,6 +238,10 @@ export const enrichFromContext = (
 		return;
 	}
 	if (isSkillsCommand(args) || isPluginsCommand(args)) {
+		return;
+	}
+	// Claim commands bypass enrichment so `claim list` never targets the current directory.
+	if (isClaimCommand(args)) {
 		return;
 	}
 	const context = readContextFile(args.contextFile);

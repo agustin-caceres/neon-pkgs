@@ -64,6 +64,57 @@ neon projects list --api-key <neon_api_key>
 
 For information about obtaining an Neon API key, see [Authentication](https://neon.com/docs/reference/api/get-started), in the _Neon API Reference_.
 
+## Create a project without an account
+
+`neon claim create` provisions a temporary Claimable Neon project for an agent without
+requiring a Neon account or opening a browser:
+
+```bash
+# Lakebase Postgres is always included
+neon claim create
+
+# Request Managed Better Auth and the Data API too
+neon claim create --service auth --service data-api
+```
+
+When the current directory has a `neon.ts`, `claim create` also requests every service
+declared there. Explicit `--service` values are added to that set. Object Storage, Functions,
+and the AI Gateway are sent to the service so demand is recorded, but are reported as
+unavailable until the project is claimed; the CLI does not silently remove them.
+
+The command writes:
+
+- a `.neon` context that identifies the project and Claimable Neon service;
+- an owner-only identity assertion under the CLI config directory;
+- `DATABASE_URL` and any granted Auth or Data API variables to `.env` or `.env.local`
+  (disable this with `--no-env-pull`).
+
+Subsequent project commands automatically exchange the assertion for a short-lived agent
+token and send API calls to Claimable Neon. The service decides which operations are
+allowed before claim.
+
+```bash
+neon claim status                 # lifecycle and transfer status
+neon projects get <project-id>    # regular CLI command, same agent token
+neon psql --role-name neondb_owner -- -c "select now()"
+neon config plan
+neon env pull --service postgres --service auth --service data-api
+
+neon claim accept                 # create a claim code and open the transfer URL
+neon claim delete --yes           # permanently delete an unclaimed project
+neon claim list                   # local records, including expired
+neon claim delete <project-id> --yes
+```
+
+`status`, `accept`, and `delete` take an optional project id from `claim list`, so a
+project stays manageable after its original directory is gone. `list` prints `state`
+(`unclaimed` or `expired`) from the identity assertion clock and the project
+expiry, plus `project_expires_at`. `delete` also drops a
+local record whose identity assertion has expired or been revoked.
+
+`neon claimable` is an alias for `neon claim`. For local service development, set
+`CLAIMABLE_NEON_HOST=http://localhost:8787`; non-local origins must use HTTPS.
+
 ## Project and branch creation
 
 Choose the PostgreSQL version when creating a project:
@@ -1173,6 +1224,7 @@ Id   Name      Project         Created At            Last Used At          Last 
 | Command                                                                    | Subcommands                                                                                                  | Description                        |
 | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
 | [auth](https://neon.com/docs/reference/cli-auth)                           |                                                                                                              | Authenticate                       |
+| claim (`claimable`)                                                        | `create`, `status`, `accept`, `list`, `delete`                                                               | Manage claimable projects          |
 | profile                                                                    | `list`, `create`, `rotate-key`, `remove`                                                                     | Manage named sets of credentials   |
 | api-keys                                                                   | `list`, `create`, `revoke`                                                                                   | Manage API keys                    |
 | [projects](https://neon.com/docs/reference/cli-projects)                   | `list`, `create`, `update`, `delete`, `get`                                                                  | Manage projects                    |
