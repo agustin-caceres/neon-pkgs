@@ -781,7 +781,7 @@ That message reports where parsing stopped and nothing more. `--data` carries wh
 # Interactive: global or project, then agents, then API key or OAuth, then confirm.
 $ neon mcp
 
-# Skip prompts. Global config, every globally detected agent, minted API key.
+# Skip prompts. Global config, every globally detected agent, reuse or mint an API key.
 $ neon mcp -y
 
 # OAuth: no API key minted. The agent prompts for Neon sign-in on first use.
@@ -804,7 +804,7 @@ $ neon mcp --category querying --category schema
 
 On a TTY the command asks for config location (global is the default), then agents, then API key vs OAuth, then a summary to confirm before it writes. Detected agents start selected: globally installed agents or project-folder markers such as `.cursor` when the install is project.
 
-`-y` skips those questions. `--project`, `--oauth` and `--agent` skip the question they answer and still apply with `-y`. `--read-only` and `--category` are flags only and are never prompted. A linked project-folder install asks whether to pin MCP tools to that `.neon` project (`?projectId=`). If you pin and selected API-key auth, the minted key is limited to that project too. An unlinked project folder does not ask. Global installs never add that param unless you pass `--project-id`. `-y` does not infer a project from `.neon`. Without a TTY, pass `-y` to mint into every detected agent, `--agent` to name the agents or `--oauth` to write the URL only.
+`-y` skips those questions. `neon mcp -y` writes `https://mcp.neon.tech/mcp` into global config for every globally detected agent, reuses an existing Neon MCP API key or mints an account-wide key, leaves write tools enabled, exposes every tool category, and does not pin a project (including from `.neon`). `--project`, `--oauth` and `--agent` skip the question they answer and still apply with `-y`. `--read-only` and `--category` are flags only and are never prompted. A linked project-folder install asks whether to pin MCP tools to that `.neon` project (`?projectId=`). If you pin and selected API-key auth, the minted key is limited to that project too. An unlinked project folder does not ask. Global installs never add that param unless you pass `--project-id`. Without a TTY, pass `-y` to mint into every detected agent, `--agent` to name the agents or `--oauth` to write the URL only. `neon mcp --help` lists the server URL, those `-y` defaults, the supported `--agent` names, and the `--category` values.
 
 `--agent` names: `antigravity`, `cline`, `cline-cli`, `claude-code`, `codex`, `cursor`, `gemini-cli`, `goose`, `github-copilot-cli`, `grok-build`, `mcporter`, `opencode`, `vscode`, `windsurf`, `zed`. Project installs drop `antigravity`, `cline`, `cline-cli`, `goose` and `windsurf`. `claude-desktop` is a known name that is then skipped.
 
@@ -838,9 +838,9 @@ On a TTY the command asks which agents and which skills, then shows a summary to
 
 `-y` skips those questions and installs the default skills. `--skill` / `-s` names specific skills and skips the skill picker. `--agent` and `--global` still apply. Without a TTY, pass `-y` or `--skill`. `--agent` alone is not enough.
 
-`--skill` names: `claimable-postgres`, `neon`, `neon-ai-gateway`, `neon-functions`, `neon-object-storage`, `neon-postgres`, `neon-postgres-branches`, `neon-postgres-egress-optimizer`, `neon-postgres-agent-platforms`.
+`--skill` names by source repo: `neondatabase/agent-skills` (`claimable-postgres`, `neon`, `neon-ai-gateway`, `neon-functions`, `neon-object-storage`, `neon-postgres`, `neon-postgres-branches`, `neon-postgres-egress-optimizer`); `neondatabase/neon-for-agent-platforms` (`neon-postgres-agent-platforms`).
 
-`--agent` names match `neon mcp`, minus agents that cannot install skills: `antigravity`, `cline`, `cline-cli`, `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemini-cli`, `goose`, `github-copilot-cli`, `grok-build`, `opencode`, `vscode`, `windsurf`, `zed`. `mcporter` is a known MCP name that is then skipped.
+`--agent` names match `neon mcp`, minus agents that cannot install skills: `antigravity`, `cline`, `cline-cli`, `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemini-cli`, `goose`, `github-copilot-cli`, `grok-build`, `opencode`, `vscode`, `windsurf`, `zed`. `mcporter` is a known MCP name that is then skipped. `neon skills --help` lists the same skill and agent values, and that `-y` leaves out `neon-postgres-agent-platforms`.
 
 ## Install the Neon plugin (`plugins`)
 
@@ -868,7 +868,9 @@ Default scope is `project`. `--global` is `user`. On macOS and Linux, Cursor and
 
 `--agent` names with a plugins mapping: `claude-code`, `claude-desktop`, `codex`, `cursor`, `github-copilot-cli`, `grok-build`, `vscode`. `claude-desktop` installs as Claude Code; naming both produces one install and lists both names in the table. `mcporter` is a known MCP name that is then skipped.
 
-The plugins CLI installs every plugin it finds in the Neon plugin package. Today that is `neon-postgres`.
+The plugins CLI installs every plugin it finds in the Neon plugin package. Today that is `neon-postgres` from `neondatabase/agent-skills`. It includes the Neon MCP server (`https://mcp.neon.tech/mcp`) and these skills: `neon`, `neon-ai-gateway`, `neon-functions`, `neon-object-storage`, `neon-postgres`, `neon-postgres-branches`, `neon-postgres-egress-optimizer`. It does not include `claimable-postgres` or `neon-postgres-agent-platforms`.
+
+`neon plugins --help` lists the plugin, those contents, and the supported `--agent` names.
 
 ## Snapshots (`snapshots`)
 
