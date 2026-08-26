@@ -15,17 +15,15 @@ describe("createNeonTools", () => {
 	test("creates only the explicitly selected tools", () => {
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["projects.list", "projects.createAndConnect"] as const,
+			tools: ["projects.list", "projects.create"] as const,
 		});
 
 		expect(Object.keys(tools)).toEqual([
 			"projects.list",
-			"projects.createAndConnect",
+			"projects.create",
 		]);
 		expect(tools["projects.list"].id).toBe("list_projects");
-		expect(tools["projects.createAndConnect"].id).toBe(
-			"create_and_connect_projects",
-		);
+		expect(tools["projects.create"].id).toBe("create_projects");
 	});
 
 	test("lists every page and returns the unwrapped items", async () => {

@@ -6,35 +6,31 @@ import {
 	type NeonToolsClientOptions,
 } from "./index.js";
 
+const SECRET = "never-expose-this-password";
+
 const jsonResponse = (body: unknown, status = 201) =>
 	new Response(JSON.stringify(body), {
 		status,
 		headers: { "content-type": "application/json" },
 	});
 
-const branchWithComputeBody = {
+const branchCreateBody = {
 	branch: { id: "br-id", name: "feature-x" },
 	endpoints: [{ id: "ep-id", type: "read_write" }],
 	connection_uris: [
 		{
-			connection_uri: "postgresql://user:pass@ep-host/neondb",
-			connection_parameters: {
-				host: "ep-host",
-				pooler_host: "ep-pooler-host",
-			},
+			connection_uri: `postgresql://user:${SECRET}@ep-host/neondb`,
+			connection_parameters: { password: SECRET },
 		},
 	],
 };
 
-const projectWithUriBody = {
+const projectCreateBody = {
 	project: { id: "project-id", name: "tool-created" },
 	connection_uris: [
 		{
-			connection_uri: "postgresql://user:pass@ep-host/neondb",
-			connection_parameters: {
-				host: "ep-host",
-				pooler_host: "ep-pooler-host",
-			},
+			connection_uri: `postgresql://user:${SECRET}@ep-host/neondb`,
+			connection_parameters: { password: SECRET },
 		},
 	],
 };
@@ -44,49 +40,40 @@ const createBranchTools = (options: NeonToolsClientOptions = {}) => {
 	const tools = createNeonTools({
 		apiKey: "test-key",
 		...options,
-		tools: ["branches.createWithCompute"] as const,
+		tools: ["branches.create"] as const,
 		fetch: async (input, init) => {
 			requests.push(new Request(input, init));
-			return jsonResponse(branchWithComputeBody);
+			return jsonResponse(branchCreateBody);
 		},
 	});
 	return { requests, tools };
 };
 
-describe("branches.createWithCompute", () => {
-	test("creates only the selected tool", () => {
+describe("branches.create", () => {
+	test("creates only the selected safe tool", () => {
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["branches.createWithCompute"] as const,
+			tools: ["branches.create"] as const,
 		});
 
-		expect(Object.keys(tools)).toEqual(["branches.createWithCompute"]);
-		expect(tools["branches.createWithCompute"].id).toBe(
-			"create_with_compute_branches",
-		);
-		expect(tools["branches.createWithCompute"].operationId).toBe(
-			"branches.createWithCompute",
-		);
-		expect(tools["branches.createWithCompute"].requiresApproval).toBe(true);
-		expect(tools["branches.createWithCompute"].annotations).toEqual({
+		expect(Object.keys(tools)).toEqual(["branches.create"]);
+		expect(tools["branches.create"].id).toBe("create_branches");
+		expect(tools["branches.create"].operationId).toBe("branches.create");
+		expect(tools["branches.create"].requiresApproval).toBe(true);
+		expect(tools["branches.create"].annotations).toEqual({
 			readOnlyHint: false,
 			destructiveHint: true,
 			openWorldHint: true,
 		});
 	});
 
-	test("posts a read-write endpoint and returns the SDK workflow result", async () => {
+	test("returns branch metadata without credentials from the API response", async () => {
 		const { requests, tools } = createBranchTools();
 
-		const result = await tools["branches.createWithCompute"].execute({
+		const result = await tools["branches.create"].execute({
 			project_id: "project-id",
 			name: "feature-x",
 			parent_id: "br-parent",
-			compute: {
-				min_cu: 0.5,
-				max_cu: 2,
-				suspend_timeout_seconds: 300,
-			},
 		});
 
 		expect(requests).toHaveLength(1);
@@ -96,69 +83,53 @@ describe("branches.createWithCompute", () => {
 		);
 		expect(await requests[0].json()).toEqual({
 			branch: { name: "feature-x", parent_id: "br-parent" },
-			endpoints: [
-				{
-					type: "read_write",
-					autoscaling_limit_min_cu: 0.5,
-					autoscaling_limit_max_cu: 2,
-					suspend_timeout_seconds: 300,
-				},
-			],
 		});
 		expect(result).toEqual({
-			data: {
-				branch: { id: "br-id", name: "feature-x" },
-				endpoint: { id: "ep-id", type: "read_write" },
-				connectionString:
-					"postgresql://user:pass@ep-pooler-host/neondb",
-			},
+			data: { id: "br-id", name: "feature-x" },
 		});
+		expect(JSON.stringify(result)).not.toContain(SECRET);
+		expect(JSON.stringify(result)).not.toContain("connection_uri");
 	});
 
-	test("forwards pooled: false to the SDK connection-string picker", async () => {
-		const { tools } = createBranchTools();
+	test("forwards branch creation options without adding compute", async () => {
+		const { requests, tools } = createBranchTools();
 
-		const result = await tools["branches.createWithCompute"].execute({
+		await tools["branches.create"].execute({
 			project_id: "project-id",
-			pooled: false,
+			protected: true,
 		});
 
-		expect(result.data.connectionString).toBe(
-			"postgresql://user:pass@ep-host/neondb",
-		);
+		expect(await requests[0].json()).toEqual({
+			branch: { protected: true },
+		});
 	});
 
-	test("forwards an abort signal to the SDK call", async () => {
+	test("forwards an abort signal", async () => {
 		const controller = new AbortController();
 		controller.abort();
 		const { tools } = createBranchTools();
 
 		await expect(
-			tools["branches.createWithCompute"].execute(
+			tools["branches.create"].execute(
 				{ project_id: "project-id" },
 				{ signal: controller.signal },
 			),
 		).rejects.toThrow();
 	});
 
-	test("describes pooled on the published schema", () => {
+	test("does not publish connection options on the schema", () => {
 		const { tools } = createBranchTools();
-		const schema = z.toJSONSchema(
-			tools["branches.createWithCompute"].inputSchema,
-		);
-		const pooled = schema.properties?.pooled;
+		const schema = z.toJSONSchema(tools["branches.create"].inputSchema);
 
-		expect(pooled).toMatchObject({
-			type: "boolean",
-			description: expect.stringContaining("Default true"),
-		});
+		expect(schema.properties).not.toHaveProperty("pooled");
+		expect(schema.properties).not.toHaveProperty("compute");
 	});
 
 	test("rejects unknown input fields", () => {
 		const { tools } = createBranchTools();
 
 		expect(
-			tools["branches.createWithCompute"].inputSchema.safeParse({
+			tools["branches.create"].inputSchema.safeParse({
 				project_id: "project-id",
 				parentId: "br-parent",
 			}).success,
@@ -170,9 +141,7 @@ describe("branches.createWithCompute", () => {
 			inject: { projectId: "granted-project", omitFromSchema: true },
 		});
 
-		await tools["branches.createWithCompute"].execute({
-			name: "feature-x",
-		});
+		await tools["branches.create"].execute({ name: "feature-x" });
 
 		expect(requests[0].url).toBe(
 			"https://console.neon.tech/api/v2/projects/granted-project/branches",
@@ -182,11 +151,11 @@ describe("branches.createWithCompute", () => {
 	test("renames the published id", () => {
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["branches.createWithCompute"] as const,
-			names: { "branches.createWithCompute": "create_branch" },
+			tools: ["branches.create"] as const,
+			names: { "branches.create": "create_branch" },
 		});
 
-		expect(tools["branches.createWithCompute"].id).toBe("create_branch");
+		expect(tools["branches.create"].id).toBe("create_branch");
 	});
 
 	test("uses an execute-time credential instead of the constructor credential", async () => {
@@ -194,7 +163,7 @@ describe("branches.createWithCompute", () => {
 			apiKey: "constructor-key",
 		});
 
-		await tools["branches.createWithCompute"].execute(
+		await tools["branches.create"].execute(
 			{ project_id: "project-id" },
 			{ apiKey: "oauth-access-token" },
 		);
@@ -210,7 +179,7 @@ describe("branches.createWithCompute", () => {
 		});
 
 		await expect(
-			tools["branches.createWithCompute"].execute(
+			tools["branches.create"].execute(
 				{ project_id: "project-id" },
 				{ apiKey: "" },
 			),
@@ -219,19 +188,19 @@ describe("branches.createWithCompute", () => {
 	});
 });
 
-describe("projects.createAndConnect", () => {
-	test("posts the project body and returns the SDK workflow result", async () => {
+describe("projects.create", () => {
+	test("returns project metadata without credentials from the API response", async () => {
 		const requests: Request[] = [];
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["projects.createAndConnect"] as const,
+			tools: ["projects.create"] as const,
 			fetch: async (input, init) => {
 				requests.push(new Request(input, init));
-				return jsonResponse(projectWithUriBody);
+				return jsonResponse(projectCreateBody);
 			},
 		});
 
-		const result = await tools["projects.createAndConnect"].execute({
+		const result = await tools["projects.create"].execute({
 			name: "tool-created",
 			region_id: "aws-us-east-1",
 		});
@@ -247,48 +216,54 @@ describe("projects.createAndConnect", () => {
 			},
 		});
 		expect(result).toEqual({
-			data: {
-				project: { id: "project-id", name: "tool-created" },
-				connectionString:
-					"postgresql://user:pass@ep-pooler-host/neondb",
-			},
+			data: { id: "project-id", name: "tool-created" },
 		});
+		expect(JSON.stringify(result)).not.toContain(SECRET);
+		expect(JSON.stringify(result)).not.toContain("connection_uri");
 	});
 
-	test("forwards pooled: false", async () => {
+	test("keeps connection-string retrieval as an explicit approved tool", async () => {
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["projects.createAndConnect"] as const,
-			fetch: async () => jsonResponse(projectWithUriBody),
+			tools: ["postgres.connectionString"] as const,
+			fetch: async () =>
+				jsonResponse({
+					uri: `postgresql://user:${SECRET}@ep-host/neondb`,
+				}),
 		});
 
-		const result = await tools["projects.createAndConnect"].execute({
-			name: "tool-created",
-			pooled: false,
+		const result = await tools["postgres.connectionString"].execute({
+			project_id: "project-id",
+			branch_id: "br-id",
+			database_name: "neondb",
+			role_name: "neondb_owner",
 		});
 
-		expect(result.data.connectionString).toBe(
-			"postgresql://user:pass@ep-host/neondb",
-		);
+		expect(tools["postgres.connectionString"].requiresApproval).toBe(true);
+		expect(result.data).toContain(SECRET);
 	});
 });
 
 describe("createNeonTool", () => {
 	test("creates a single ergonomic tool", async () => {
 		const requests: Request[] = [];
-		const tool = createNeonTool("branches.createWithCompute", {
+		const tool = createNeonTool("branches.create", {
 			apiKey: "test-key",
 			fetch: async (input, init) => {
 				requests.push(new Request(input, init));
-				return jsonResponse(branchWithComputeBody);
+				return jsonResponse(branchCreateBody);
 			},
 		});
 
-		await tool.execute({ project_id: "project-id", name: "feature-x" });
+		const result = await tool.execute({
+			project_id: "project-id",
+			name: "feature-x",
+		});
 
-		expect(tool.id).toBe("create_with_compute_branches");
+		expect(tool.id).toBe("create_branches");
 		expect(requests[0].url).toBe(
 			"https://console.neon.tech/api/v2/projects/project-id/branches",
 		);
+		expect(JSON.stringify(result)).not.toContain(SECRET);
 	});
 });

@@ -21,25 +21,10 @@ const pooledField = z
 	.optional();
 
 const branchCreateFields = zod.zBranchCreateRequest.shape.branch.unwrap().shape;
-const projectCreateFields = zod.zCreateProjectBody.shape.project.shape;
 
-export const createBranchWithComputeInputSchema = z.strictObject({
+export const createBranchInputSchema = z.strictObject({
 	project_id: zod.zCreateProjectBranchPath.shape.project_id,
-	name: branchCreateFields.name,
-	parent_id: branchCreateFields.parent_id,
-	compute: z
-		.strictObject({
-			min_cu: zod.zComputeUnit.optional(),
-			max_cu: zod.zComputeUnit.optional(),
-			suspend_timeout_seconds: zod.zSuspendTimeoutSeconds.optional(),
-		})
-		.optional(),
-	pooled: pooledField,
-});
-
-export const createProjectAndConnectInputSchema = z.strictObject({
-	...projectCreateFields,
-	pooled: pooledField,
+	...branchCreateFields,
 });
 
 export const getDefaultInputSchema = z.strictObject({
@@ -103,16 +88,16 @@ export const setScheduleInputSchema = z.strictObject({
 	),
 });
 
-export const createBranchWithComputeTool = (options: ToolClientOptions) =>
+export const createBranchTool = (options: ToolClientOptions) =>
 	bindTool(
 		options,
 		{
-			operationId: "branches.createWithCompute",
-			id: publishedId("branches.createWithCompute"),
-			title: "Create branch with compute",
+			operationId: "branches.create",
+			id: publishedId("branches.create"),
+			title: "Create branch",
 			description:
-				"Create a branch with a read-write endpoint and return its connection string. The call waits until operation-backed provisioning finishes, up to five minutes by default.",
-			inputSchema: createBranchWithComputeInputSchema,
+				"Create a branch without returning connection credentials. Add a compute with postgres.endpoints.create and request credentials separately with postgres.connectionString when needed.",
+			inputSchema: createBranchInputSchema,
 			annotations: writeAnnotations,
 			requiresApproval: true,
 			metadata: {
@@ -123,57 +108,9 @@ export const createBranchWithComputeTool = (options: ToolClientOptions) =>
 				tags: ["Branch"],
 			},
 		},
-		(neon, input, signal) =>
-			neon.branches.createWithCompute(
-				input.project_id,
-				{
-					name: input.name,
-					parentId: input.parent_id,
-					compute:
-						input.compute === undefined
-							? undefined
-							: {
-									minCu: input.compute.min_cu,
-									maxCu: input.compute.max_cu,
-									suspendTimeoutSeconds:
-										input.compute.suspend_timeout_seconds,
-								},
-				},
-				{
-					signal,
-					...(input.pooled === undefined
-						? {}
-						: { pooled: input.pooled }),
-				},
-			),
-	);
-
-export const createProjectAndConnectTool = (options: ToolClientOptions) =>
-	bindTool(
-		options,
-		{
-			operationId: "projects.createAndConnect",
-			id: publishedId("projects.createAndConnect"),
-			title: "Create project and connect",
-			description:
-				"Create a project and return a connection string to its default branch. The call waits until operation-backed provisioning finishes, up to five minutes by default.",
-			inputSchema: createProjectAndConnectInputSchema,
-			annotations: writeAnnotations,
-			requiresApproval: true,
-			metadata: {
-				method: "POST",
-				path: "/projects",
-				stability: "stable",
-				deprecated: false,
-				tags: ["Project"],
-			},
-		},
 		(neon, input, signal) => {
-			const { pooled, ...project } = input;
-			return neon.projects.createAndConnect(project, {
-				signal,
-				...(pooled === undefined ? {} : { pooled }),
-			});
+			const { project_id, ...branch } = input;
+			return neon.branches.create(project_id, branch, { signal });
 		},
 	);
 

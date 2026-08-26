@@ -23,15 +23,16 @@ const tools = createNeonTools({
 	apiKey,
 	tools: [
 		"projects.list",
-		"projects.createAndConnect",
-		"branches.createWithCompute",
+		"projects.create",
+		"branches.create",
+		"postgres.connectionString",
 		"branches.resetFromParent",
 		"branches.compareSchema",
 	],
 });
 
 const listed = await tools["projects.list"].execute({ limit: 10 });
-const created = await tools["projects.createAndConnect"].execute({
+const created = await tools["projects.create"].execute({
 	name: "agent-project",
 	region_id: "aws-us-east-1",
 });
@@ -70,7 +71,7 @@ Each tool includes its Zod 4 `inputSchema`, published `id`, title, description, 
 Paginated lists call `.all()` and return the item array. Do not pass a cursor; those fields are omitted from the input schema.
 
 ```ts
-const createBranch = createNeonTool("branches.createWithCompute", { apiKey });
+const createBranch = createNeonTool("branches.create", { apiKey });
 ```
 
 ## Writes and waiting
@@ -83,7 +84,9 @@ An abort `signal` on `execute` or a wait timeout stops the poll, not the create:
 
 `metadata.method` and `metadata.path` name the first request; extra readiness GETs are not listed there.
 
-These public client methods are not tools: `projects.create`, `branches.create`, `operations.waitFor`, `postgres.roles.password`, and `storage.objects.get`. Use `projects.createAndConnect` and `branches.createWithCompute` for creates that attach compute and return a connection string. Waiting is what the write tools already do.
+`projects.create` and `branches.create` return only the created resource metadata. They do not return connection credentials. Add a branch compute with `postgres.endpoints.create`, then request a connection string explicitly with `postgres.connectionString` when it is needed.
+
+These public client methods are not tools: `projects.createAndConnect`, `branches.createWithCompute`, `operations.waitFor`, `postgres.roles.password`, and `storage.objects.get`. Waiting is what the write tools already do.
 
 ## Optional host add-ons
 
@@ -127,17 +130,17 @@ This package does not send analytics. Mutating `event.input` does not change a g
 ```ts
 const tools = createNeonTools({
 	apiKey,
-	tools: ["branches.createWithCompute", "projects.list"] as const,
-	names: { "branches.createWithCompute": "create_branch" },
+	tools: ["branches.create", "projects.list"] as const,
+	names: { "branches.create": "create_branch" },
 	name: (id) => `neon_${id}`,
 });
 ```
 
-Those tools publish as `neon_create_branch` and `neon_list_projects`. The record is still keyed by SDK path (`tools["branches.createWithCompute"]`). MCP and Mastra publish `tool.id`. Eve uses the filename as the model-facing name, so name the file after the published `id`. Duplicate or non-snake-case ids throw, and a `names` key that matches no selected tool throws.
+Those tools publish as `neon_create_branch` and `neon_list_projects`. The record is still keyed by SDK path (`tools["branches.create"]`). MCP and Mastra publish `tool.id`. Eve uses the filename as the model-facing name, so name the file after the published `id`. Duplicate or non-snake-case ids throw, and a `names` key that matches no selected tool throws.
 
 ### Project and branch injection
 
-Tools take path parameters as `project_id` and `branch_id`. A host that already knows those values can inject them, including on `branches.createWithCompute`. Without `omitFromSchema`, the published field becomes optional and a caller-supplied value wins. With `omitFromSchema: true`, the field is removed from the published schema and the injector is the only source:
+Tools take path parameters as `project_id` and `branch_id`. A host that already knows those values can inject them, including on `branches.create`. Without `omitFromSchema`, the published field becomes optional and a caller-supplied value wins. With `omitFromSchema: true`, the field is removed from the published schema and the injector is the only source:
 
 ```ts
 const tools = createNeonTools({
@@ -193,7 +196,7 @@ const body = zCreateProjectBody.parse({
 });
 ```
 
-These are the raw OpenAPI request shapes, not the tool input. `zCreateProjectBody` still wraps fields in `project`. `projects.createAndConnect` does not.
+These are the raw OpenAPI request shapes, not the tool input. `zCreateProjectBody` still wraps fields in `project`. `projects.create` does not.
 
 These schemas are strict. If a newly added API field is not recognized, upgrade `@neon/tools`; use `@neon/sdk` directly until a matching tools release is available.
 
@@ -212,7 +215,7 @@ if (!apiKey) throw new Error("NEON_API_KEY is required");
 const server = new McpServer({ name: "neon", version: "1.0.0" });
 const tools = createNeonTools({
 	apiKey,
-	tools: ["projects.list", "projects.createAndConnect"] as const,
+	tools: ["projects.list", "projects.create"] as const,
 });
 
 registerNeonTools(server, tools);
@@ -222,7 +225,7 @@ For a remote MCP server that already authenticated the client, omit `apiKey` at 
 
 ```ts
 const tools = createNeonTools({
-	tools: ["projects.list", "projects.createAndConnect"] as const,
+	tools: ["projects.list", "projects.create"] as const,
 });
 registerNeonTools(server, tools);
 ```
@@ -243,7 +246,7 @@ MCP annotations are advisory; the protocol does not enforce approval. Tools expo
 
 Eve requires Node.js 24 or later.
 
-`create_and_connect_projects.ts`:
+`create_projects.ts`:
 
 ```ts
 import { defineTool } from "eve/tools";
@@ -255,7 +258,7 @@ if (!apiKey) throw new Error("NEON_API_KEY is required");
 
 export default defineTool(
 	toEveTool(
-		createNeonTool("projects.createAndConnect", {
+		createNeonTool("projects.create", {
 			apiKey,
 		}),
 	),
@@ -278,12 +281,12 @@ if (!apiKey) throw new Error("NEON_API_KEY is required");
 
 const neonTools = createNeonTools({
 	apiKey,
-	tools: ["projects.list", "projects.createAndConnect"] as const,
+	tools: ["projects.list", "projects.create"] as const,
 });
 const configs = toMastraTools(neonTools);
 
 const listProjects = createTool(configs.list_projects);
-const createProject = createTool(configs.create_and_connect_projects);
+const createProject = createTool(configs.create_projects);
 ```
 
 The adapter maps approval requirements to Mastra's `requireApproval` field and forwards its abort signal.

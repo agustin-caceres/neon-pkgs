@@ -16,7 +16,7 @@ describe("Eve compatibility", () => {
 		const controller = new AbortController();
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["projects.createAndConnect"],
+			tools: ["projects.create"],
 			fetch: async (input, init) => {
 				const request =
 					input instanceof Request ? input : new Request(input, init);
@@ -29,12 +29,10 @@ describe("Eve compatibility", () => {
 			},
 		});
 
-		const config = toEveTool(tools["projects.createAndConnect"]);
+		const config = toEveTool(tools["projects.create"]);
 		const tool = defineTool(config);
 
-		expect(tool.description).toBe(
-			tools["projects.createAndConnect"].description,
-		);
+		expect(tool.description).toBe(tools["projects.create"].description);
 		expect(typeof tool.approval).toBe("function");
 		await expect(
 			config.execute(
@@ -59,16 +57,16 @@ describe("Mastra compatibility", () => {
 	test("produces createTool-compatible records with approval metadata", () => {
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["projects.list", "projects.createAndConnect"],
+			tools: ["projects.list", "projects.create"],
 		});
 
 		const configs = toMastraTools(tools);
 		const listProjects = createTool(configs.list_projects);
-		const createProject = createTool(configs.create_and_connect_projects);
+		const createProject = createTool(configs.create_projects);
 
 		expect(listProjects.id).toBe("list_projects");
 		expect(listProjects.requireApproval).toBe(false);
-		expect(createProject.id).toBe("create_and_connect_projects");
+		expect(createProject.id).toBe("create_projects");
 		expect(createProject.requireApproval).toBe(true);
 	});
 

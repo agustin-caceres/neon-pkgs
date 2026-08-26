@@ -6,12 +6,8 @@ import { toolIds } from "./lib/ergonomic/ids.js";
 describe("publishedId", () => {
 	test("moves the last path segment in front", () => {
 		expect(publishedId("projects.list")).toBe("list_projects");
-		expect(publishedId("projects.createAndConnect")).toBe(
-			"create_and_connect_projects",
-		);
-		expect(publishedId("branches.createWithCompute")).toBe(
-			"create_with_compute_branches",
-		);
+		expect(publishedId("projects.create")).toBe("create_projects");
+		expect(publishedId("branches.create")).toBe("create_branches");
 		expect(publishedId("postgres.roles.resetPassword")).toBe(
 			"reset_password_postgres_roles",
 		);

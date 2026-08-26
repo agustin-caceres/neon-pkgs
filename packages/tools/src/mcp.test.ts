@@ -142,6 +142,48 @@ const captureHandler = () => {
 	};
 };
 
+describe("MCP secret boundaries", () => {
+	for (const [version, register] of [
+		["v2", registerNeonToolsV2],
+		["v1", registerNeonToolsV1],
+	] as const) {
+		test(`${version} project creation omits credentials returned by the API`, async () => {
+			const { server, handler } = captureHandler();
+			const safeTools = createNeonTools({
+				apiKey: "test-key",
+				tools: ["projects.create"],
+				fetch: async () =>
+					new Response(
+						JSON.stringify({
+							project: { id: "project-id", name: "safe" },
+							connection_uris: [
+								{
+									connection_uri:
+										"postgresql://user:never-expose-this-password@example.com/neondb",
+									connection_parameters: {
+										password: "never-expose-this-password",
+									},
+								},
+							],
+						}),
+						{ headers: { "content-type": "application/json" } },
+					),
+			});
+			register(server, safeTools);
+
+			const result = await handler()({ name: "safe" }, {});
+
+			expect(result.structuredContent).toEqual({
+				data: { id: "project-id", name: "safe" },
+			});
+			expect(JSON.stringify(result)).not.toContain(
+				"never-expose-this-password",
+			);
+			expect(JSON.stringify(result)).not.toContain("connection_uri");
+		});
+	}
+});
+
 const toolsWithCapturedAuth = () => {
 	const requests: Request[] = [];
 	const tools = createNeonTools({

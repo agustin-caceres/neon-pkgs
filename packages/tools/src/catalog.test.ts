@@ -48,10 +48,10 @@ describe("ergonomic catalog coverage", () => {
 		}
 		expect(() =>
 			Reflect.apply(createNeonTool, undefined, [
-				"projects.create",
+				"projects.createAndConnect",
 				{ apiKey: "test-key" },
 			]),
-		).toThrow("projects.createAndConnect");
+		).toThrow("postgres.connectionString");
 	});
 });
 

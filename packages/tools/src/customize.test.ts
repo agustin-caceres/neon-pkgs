@@ -738,7 +738,7 @@ describe("path injection (fill, omit, and non-path fields)", () => {
 		const requests: Request[] = [];
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["branches.delete", "branches.createWithCompute"] as const,
+			tools: ["branches.delete", "branches.create"] as const,
 			inject: { projectId: "granted-project", omitFromSchema: true },
 			fetch: async (input, init) => {
 				requests.push(new Request(input, init));
@@ -749,7 +749,7 @@ describe("path injection (fill, omit, and non-path fields)", () => {
 		await tools["branches.delete"].execute({
 			branch_id: "br-id",
 		});
-		await tools["branches.createWithCompute"].execute({
+		await tools["branches.create"].execute({
 			name: "feature",
 		});
 
@@ -762,7 +762,6 @@ describe("path injection (fill, omit, and non-path fields)", () => {
 		);
 		expect(await requests[1].json()).toEqual({
 			branch: { name: "feature" },
-			endpoints: [{ type: "read_write" }],
 		});
 	});
 
@@ -910,19 +909,16 @@ describe("path injection (fill, omit, and non-path fields)", () => {
 	test("drops path from createProjectBranch when project_id is omitted", () => {
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["branches.createWithCompute"] as const,
+			tools: ["branches.create"] as const,
 			inject: { projectId: "granted-project", omitFromSchema: true },
 		});
 
-		const schema = z.toJSONSchema(
-			tools["branches.createWithCompute"].inputSchema,
-		);
+		const schema = z.toJSONSchema(tools["branches.create"].inputSchema);
 		expect(schema.properties).not.toHaveProperty("project_id");
 		expect(schema.properties).toHaveProperty("name");
-		expect(
-			tools["branches.createWithCompute"].inputSchema.safeParse({})
-				.success,
-		).toBe(true);
+		expect(tools["branches.create"].inputSchema.safeParse({}).success).toBe(
+			true,
+		);
 	});
 
 	test("isolates request-scoped getters through host AsyncLocalStorage", async () => {
@@ -962,22 +958,20 @@ describe("tool names", () => {
 	test("renames one tool and then applies a global prefix", () => {
 		const tools = createNeonTools({
 			apiKey: "test-key",
-			tools: ["branches.createWithCompute", "projects.list"] as const,
-			names: { "branches.createWithCompute": "create_branch" },
+			tools: ["branches.create", "projects.list"] as const,
+			names: { "branches.create": "create_branch" },
 			name: (id) => `neon_${id}`,
 		});
 
-		expect(tools["branches.createWithCompute"].id).toBe(
-			"neon_create_branch",
-		);
+		expect(tools["branches.create"].id).toBe("neon_create_branch");
 		expect(tools["projects.list"].id).toBe("neon_list_projects");
 	});
 
 	test("lets a function rename from the generated id", () => {
-		const tool = createNeonTool("branches.createWithCompute", {
+		const tool = createNeonTool("branches.create", {
 			apiKey: "test-key",
 			names: ({ id }) =>
-				id === "create_with_compute_branches" ? "create_branch" : id,
+				id === "create_branches" ? "create_branch" : id,
 		});
 
 		expect(tool.id).toBe("create_branch");
@@ -1012,7 +1006,7 @@ describe("tool names", () => {
 		expect(() =>
 			createNeonTools({
 				apiKey: "test-key",
-				tools: ["branches.createWithCompute"] as const,
+				tools: ["branches.create"] as const,
 				names: { createProjectBrunch: "create_branch" },
 			}),
 		).toThrow("Unknown Neon tool name override: createProjectBrunch");
