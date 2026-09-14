@@ -7,6 +7,7 @@ import {
 import type { CallOptions, RequestContext } from "../context.js";
 import { cancelled, runBounded } from "../deadline.js";
 import { NeonClientError, toNeonError } from "../errors.js";
+import { invalidParamsResult, validateCallOptions } from "../params.js";
 import { err, finalize, type NeonResult, type Outcome, ok } from "../result.js";
 import { DataApi } from "./dataapi.js";
 import { Databases } from "./databases.js";
@@ -66,6 +67,10 @@ export class Postgres<DThrow extends boolean> {
 	): Promise<string | NeonResult<string>> {
 		const shouldThrow =
 			opts?.throwOnError ?? this.#ctx.defaults.throwOnError;
+		const invalid = validateCallOptions(opts);
+		if (invalid) {
+			return invalidParamsResult<string>(invalid, shouldThrow);
+		}
 		// This resolver makes up to four sequential requests without going through
 		// RequestContext, so it owns the deadline covering all of them.
 		const deadline = this.#ctx.deadlineFor(opts);

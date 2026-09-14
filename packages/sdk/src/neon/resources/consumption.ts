@@ -14,6 +14,7 @@ import type {
 import type { CallOptions, RequestContext } from "../context.js";
 import { NeonClientError } from "../errors.js";
 import { type Paginated, paginate } from "../paginate.js";
+import { validateCallOptions } from "../params.js";
 
 type PerProjectQuery = Omit<
 	GetConsumptionHistoryPerProjectData["query"],
@@ -59,14 +60,16 @@ export class Consumption<DThrow extends boolean> {
 		query: PerProjectQuery,
 		opts?: CallOptions,
 	): Paginated<ConsumptionHistoryPerProject, boolean> {
+		const invalid = validateCallOptions(opts);
 		const { orgId, org_id, ...rest } = query;
 		const resolved = resolvedOrgId(
 			{ orgId, org_id },
 			this.#ctx.defaults.orgId,
 		);
 		return paginate(
-			(cursor, signal) =>
-				getConsumptionHistoryPerProject({
+			async (cursor, signal) => {
+				if (invalid) throw invalid;
+				return getConsumptionHistoryPerProject({
 					client: this.#ctx.client,
 					query: {
 						...rest,
@@ -75,7 +78,8 @@ export class Consumption<DThrow extends boolean> {
 					},
 					throwOnError: false,
 					signal,
-				}),
+				});
+			},
 			(data) => ({
 				items: data?.projects ?? [],
 				cursor: data?.pagination?.cursor,
@@ -97,6 +101,7 @@ export class Consumption<DThrow extends boolean> {
 		query: PerProjectV2Query,
 		opts?: CallOptions,
 	): Paginated<ConsumptionHistoryPerProjectV2, boolean> {
+		const invalid = validateCallOptions(opts);
 		const { orgId, org_id, ...rest } = query;
 		const resolved = resolvedOrgId(
 			{ orgId, org_id },
@@ -104,6 +109,9 @@ export class Consumption<DThrow extends boolean> {
 		);
 		return paginate(
 			(cursor, signal) => {
+				if (invalid) {
+					return Promise.reject(invalid);
+				}
 				if (resolved === undefined) {
 					return Promise.resolve({
 						error: new NeonClientError(MISSING_ORG),
@@ -137,6 +145,7 @@ export class Consumption<DThrow extends boolean> {
 		query: PerBranchV2Query,
 		opts?: CallOptions,
 	): Paginated<ConsumptionHistoryPerBranchV2, boolean> {
+		const invalid = validateCallOptions(opts);
 		const { orgId, org_id, ...rest } = query;
 		const resolved = resolvedOrgId(
 			{ orgId, org_id },
@@ -144,6 +153,9 @@ export class Consumption<DThrow extends boolean> {
 		);
 		return paginate(
 			(cursor, signal) => {
+				if (invalid) {
+					return Promise.reject(invalid);
+				}
 				if (resolved === undefined) {
 					return Promise.resolve({
 						error: new NeonClientError(MISSING_ORG),

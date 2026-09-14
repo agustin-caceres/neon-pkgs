@@ -7,6 +7,7 @@ import {
 	runBounded,
 } from "./deadline.js";
 import { type NeonErrorUnion, toNeonError } from "./errors.js";
+import { validateCallOptions } from "./params.js";
 import { err, finalize, type NeonResult, ok } from "./result.js";
 import { withRetries } from "./retry.js";
 import { hasOperations, type WaitBudget, waitForOperations } from "./wait.js";
@@ -174,6 +175,8 @@ export class RequestContext {
 		opts: CallOptions | undefined,
 		exec: Exec<D>,
 	): Promise<Requested<D>> {
+		const invalid = validateCallOptions(opts);
+		if (invalid) return { ok: false, error: invalid };
 		const deadline = this.deadlineFor(opts);
 		try {
 			const raw = await runBounded(deadline, () =>
