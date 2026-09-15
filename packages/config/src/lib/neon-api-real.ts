@@ -57,6 +57,7 @@ import type {
 	NeonCredentialMeta,
 	NeonCredentialReveal,
 	NeonCredentialSecret,
+	NeonCustomDomainSnapshot,
 	NeonDataApiSnapshot,
 	NeonDatabaseSnapshot,
 	NeonEndpointSnapshot,
@@ -231,10 +232,14 @@ const neonFunctionSchema = z.object({
 	slug: z.string(),
 	name: z.string(),
 	invocation_url: z.string(),
+	current_deployment: functionDeploymentSchema.optional(),
 	active_deployment: functionDeploymentSchema.optional(),
 });
 const functionsListResponseSchema = z.object({
 	functions: z.array(neonFunctionSchema),
+});
+const functionGetResponseSchema = z.object({
+	function: neonFunctionSchema,
 });
 const functionDeploymentResponseSchema = z.object({
 	deployment: functionDeploymentSchema,
@@ -255,6 +260,18 @@ const triggerResponseSchema = z.object({ trigger: scheduleTriggerSchema });
 const triggersListResponseSchema = z.object({
 	triggers: z.array(scheduleTriggerSchema),
 });
+
+const customDomainApiSchema = z.object({
+	domain: z.string(),
+	entity_type: z.string(),
+	entity_id: z.string(),
+	cname_target: z.string(),
+});
+const customDomainsListResponseSchema = z.object({
+	custom_domains: z.array(customDomainApiSchema),
+	pagination: z.object({ next: z.string().optional() }).optional(),
+});
+const CUSTOM_DOMAINS_LIST_LIMIT = 100;
 
 // ─── Preview: branch-scoped credentials ─────────────────────────────────────
 
@@ -401,6 +418,22 @@ function readHttpStatusFromError(err: unknown): number | undefined {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function collectCursorPages<T>(
+	fetchPage: (
+		cursor: string | undefined,
+	) => Promise<{ items: T[]; next?: string }>,
+): Promise<T[]> {
+	const items: T[] = [];
+	let cursor: string | undefined;
+	for (;;) {
+		const page = await fetchPage(cursor);
+		items.push(...page.items);
+		if (!page.next || page.next === cursor) break;
+		cursor = page.next;
+	}
+	return items;
 }
 
 class RealNeonApi implements NeonApi {
@@ -846,8 +879,11 @@ class RealNeonApi implements NeonApi {
 		});
 	}
 
-	private async getJson(path: string): Promise<unknown> {
-		return this.request("GET", path);
+	private async getJson(
+		path: string,
+		query?: Record<string, string | number | undefined>,
+	): Promise<unknown> {
+		return this.request("GET", withQuery(path, query));
 	}
 
 	private async deleteJson(path: string): Promise<unknown> {
@@ -1189,6 +1225,25 @@ class RealNeonApi implements NeonApi {
 		);
 	}
 
+	async getBranchFunction(
+		projectId: string,
+		branchId: string,
+		slug: string,
+	): Promise<NeonFunctionSnapshot> {
+		return this.call(
+			`getBranchFunction(${projectId}/${branchId}/${slug})`,
+			async () => {
+				const data = await this.getJson(
+					`${branchPreviewPath(projectId, branchId, "functions")}/${encodeURIComponent(slug)}`,
+				);
+				return functionToSnapshot(
+					functionGetResponseSchema.parse(data).function,
+				);
+			},
+			{ projectId },
+		);
+	}
+
 	async listBranchTriggers(
 		projectId: string,
 		branchId: string,
@@ -1299,6 +1354,88 @@ class RealNeonApi implements NeonApi {
 			},
 			{ projectId, mutating: true },
 		);
+	}
+
+	async listBranchCustomDomains(
+		projectId: string,
+		branchId: string,
+	): Promise<NeonCustomDomainSnapshot[]> {
+		try {
+			return await this.call(
+				`listBranchCustomDomains(${projectId}/${branchId})`,
+				async () =>
+					collectCursorPages(async (cursor) => {
+						const data = await this.getJson(
+							customDomainsPath(projectId, branchId),
+							{
+								limit: CUSTOM_DOMAINS_LIST_LIMIT,
+								...(cursor ? { cursor } : {}),
+							},
+						);
+						const parsed =
+							customDomainsListResponseSchema.parse(data);
+						return {
+							items: parsed.custom_domains.map(
+								customDomainToSnapshot,
+							),
+							...(parsed.pagination?.next
+								? { next: parsed.pagination.next }
+								: {}),
+						};
+					}),
+				{ projectId },
+			);
+		} catch (err) {
+			throw customDomainsUnavailableError(err);
+		}
+	}
+
+	async registerBranchCustomDomain(
+		projectId: string,
+		branchId: string,
+		input: { domain: string; functionSlug: string },
+	): Promise<NeonCustomDomainSnapshot> {
+		try {
+			return await this.call(
+				`registerBranchCustomDomain(${projectId}/${branchId}/${input.domain})`,
+				async () => {
+					const data = await this.postJson(
+						customDomainsPath(projectId, branchId),
+						{
+							domain: input.domain,
+							entity_type: "function",
+							entity_id: input.functionSlug,
+						},
+					);
+					return customDomainToSnapshot(
+						customDomainApiSchema.parse(data),
+					);
+				},
+				{ projectId, mutating: true },
+			);
+		} catch (err) {
+			throw customDomainsUnavailableError(err);
+		}
+	}
+
+	async deleteBranchCustomDomain(
+		projectId: string,
+		branchId: string,
+		domain: string,
+	): Promise<void> {
+		try {
+			await this.call(
+				`deleteBranchCustomDomain(${projectId}/${branchId}/${domain})`,
+				async () => {
+					await this.deleteJson(
+						`${customDomainsPath(projectId, branchId)}/${encodeURIComponent(domain)}`,
+					);
+				},
+				{ projectId, mutating: true },
+			);
+		} catch (err) {
+			throw customDomainsUnavailableError(err);
+		}
 	}
 
 	// ─── Preview: AI Gateway ───────────────────────────────────────────────────
@@ -1423,6 +1560,35 @@ function triggersPath(projectId: string, branchId: string): string {
 	return `/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branchId)}/triggers`;
 }
 
+function customDomainsPath(projectId: string, branchId: string): string {
+	return `/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branchId)}/custom-domains`;
+}
+
+function withQuery(
+	path: string,
+	query?: Record<string, string | number | undefined>,
+): string {
+	if (!query) return path;
+	const params = new URLSearchParams();
+	for (const [key, value] of Object.entries(query)) {
+		if (value === undefined) continue;
+		params.set(key, String(value));
+	}
+	const qs = params.toString();
+	return qs.length > 0 ? `${path}?${qs}` : path;
+}
+
+function customDomainToSnapshot(
+	data: z.infer<typeof customDomainApiSchema>,
+): NeonCustomDomainSnapshot {
+	return {
+		domain: data.domain,
+		entityType: data.entity_type,
+		entityId: data.entity_id,
+		cnameTarget: data.cname_target,
+	};
+}
+
 function triggerToSnapshot(
 	data: z.infer<typeof scheduleTriggerSchema>,
 ): NeonTriggerSnapshot {
@@ -1506,6 +1672,11 @@ function functionToSnapshot(
 	};
 	if (fn.active_deployment) {
 		snapshot.activeDeploymentId = fn.active_deployment.id;
+	}
+	if (fn.current_deployment) {
+		snapshot.currentDeployment = deploymentToSnapshot(
+			fn.current_deployment,
+		);
 	}
 	return snapshot;
 }
@@ -1633,6 +1804,57 @@ function platformFeatureUnavailableHint(
 		return "The endpoint is reachable but refused the request — Neon may be having a transient incident. Retry shortly; if it keeps failing, check https://neonstatus.com and contact Neon support.";
 	}
 	return PLATFORM_BETA_REGION_GUIDANCE_SHORT;
+}
+
+const CUSTOM_DOMAINS_UNAVAILABLE_HINT =
+	"Custom domains are enabled per project; deploying functions does not enable them. Remove `customDomains` from the function in neon.ts to continue deploying functions.";
+
+/**
+ * Custom-domain 404s in Functions-capable regions are project enablement, not a
+ * missing-region problem.
+ */
+export function customDomainsUnavailableError(err: unknown): unknown {
+	if (!isPreviewFeatureUnavailable(err)) return err;
+	const details = err instanceof PlatformError ? err.details : {};
+	const status =
+		typeof details.status === "number" ? details.status : undefined;
+	const neonMessage =
+		typeof details.neonMessage === "string"
+			? details.neonMessage
+			: undefined;
+	const requestId =
+		typeof details.requestId === "string" ? details.requestId : undefined;
+
+	const statusText = status ? HTTP_STATUS_TEXT[status] : undefined;
+	const apiParts = [
+		status
+			? `HTTP ${status}${statusText ? ` ${statusText}` : ""}`
+			: undefined,
+		neonMessage ? `Neon API said: "${neonMessage}"` : undefined,
+		requestId ? `request id ${requestId}` : undefined,
+	].filter((part): part is string => part !== undefined);
+	const apiContext = apiParts.length > 0 ? ` (${apiParts.join("; ")})` : "";
+
+	const hint =
+		status === 503 && !isRegionUnavailableNeonMessage(neonMessage)
+			? "The endpoint is reachable but refused the request — Neon may be having a transient incident. Retry shortly; if it keeps failing, check https://neonstatus.com and contact Neon support."
+			: CUSTOM_DOMAINS_UNAVAILABLE_HINT;
+
+	return new PlatformError(
+		ErrorCode.FeatureUnavailable,
+		[
+			`Custom domains aren't available for this Neon project${apiContext}.`,
+			hint,
+		].join(" "),
+		{
+			cause: err,
+			details: {
+				feature: "Custom domains",
+				...(status !== undefined ? { status } : {}),
+				...(requestId !== undefined ? { requestId } : {}),
+			},
+		},
+	);
 }
 
 /**

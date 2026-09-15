@@ -65,6 +65,7 @@ import { getCliName } from "../utils/cli_name.js";
 import {
 	renderAppliedChanges,
 	renderBranchSettingConflicts,
+	renderCustomDomainFollowup,
 } from "../utils/config_diff.js";
 import { fillSingleProject, resolveBranchRef } from "../utils/enrichers.js";
 import { bundleEntry } from "../utils/esbuild.js";
@@ -127,6 +128,11 @@ const neonctlBundler: FunctionBundler = async (fn) => {
 	assertZipWithinLimits(fn.slug, zip, entries);
 	return zip;
 };
+
+// Hostnames are user-controlled; matching /updateExisting/i classified
+// updateexisting.example.com as overrideable.
+const reasonAllowsUpdateExisting = (reason: string): boolean =>
+	reason.includes("Pass `updateExisting: true`");
 
 const INSPECT_FIELDS = ["project", "branch", "config"] as const;
 
@@ -694,6 +700,15 @@ export const planCmd = async (props: ConfigProps): Promise<void> => {
 	});
 	const services = utilizedServices(config);
 	reportPushResult(props, result, "plan", services);
+	if (
+		result.conflicts.some(
+			(conflict) =>
+				conflict.field === "customDomain" &&
+				!reasonAllowsUpdateExisting(conflict.reason),
+		)
+	) {
+		process.exitCode = 1;
+	}
 
 	// `plan` is a dry run and never pulls credentials, so it can only offer the plan-based
 	// (Free) AI Gateway notice — the reduced-model-set check needs a live gateway token,
@@ -741,8 +756,13 @@ export const applyCmd = async (props: ConfigProps): Promise<void> => {
 		// message (the detailed diff above replaces the library's long multi-line text).
 		if (err instanceof PushConflictError) {
 			reportConflicts(props, err.conflicts);
+			const overrideable = err.conflicts.every((c) =>
+				reasonAllowsUpdateExisting(c.reason),
+			);
 			throw new Error(
-				"Branch settings conflict with the policy. Re-run with --update-existing to apply the changes shown above.",
+				overrideable
+					? "Branch settings conflict with the policy. Re-run with --update-existing to apply the changes shown above."
+					: "The policy conflicts with remote state. --update-existing will not resolve every conflict shown above.",
 			);
 		}
 		throw err;
@@ -826,10 +846,8 @@ const reportPushResult = (
 	// chalk self-detects TTY/NO_COLOR; `--no-color` (props.color === false) forces plain.
 	const color = props.color !== false;
 	const out = writer(props);
-	// Conflicts never reach here in the CLI: `plan` runs with updateExisting on, and a bare
-	// `apply` throws PushConflictError (rendered by reportConflicts). So an empty applied set
-	// is the whole story here.
-	const noChanges = appliedChanges.length === 0;
+	const noChanges =
+		appliedChanges.length === 0 && result.conflicts.length === 0;
 
 	const appliedText = renderAppliedChanges(
 		appliedChanges,
@@ -837,6 +855,21 @@ const reportPushResult = (
 		{ color },
 	);
 	if (appliedText) out.text(`${appliedText}\n`);
+
+	if (result.conflicts.length > 0) {
+		const conflictText = renderBranchSettingConflicts(result.conflicts, {
+			color,
+		});
+		if (conflictText) out.text(`\n${conflictText}\n`);
+		for (const conflict of result.conflicts) {
+			if (!reasonAllowsUpdateExisting(conflict.reason)) {
+				out.text(`  ! ${conflict.field}: ${conflict.reason}\n`);
+			}
+		}
+	}
+
+	const followup = renderCustomDomainFollowup(result, { color });
+	if (followup) out.text(`\n${followup}\n`);
 
 	// Function URLs are a plain list rather than a table: an invocation URL can be 70+ chars,
 	// which makes any bordered table overflow and wrap awkwardly in a normal terminal. A list
@@ -879,7 +912,7 @@ const reportConflicts = (
 	});
 	if (text) out.text(`${text}\n`);
 	for (const conflict of conflicts) {
-		if (!/updateExisting/i.test(conflict.reason)) {
+		if (!reasonAllowsUpdateExisting(conflict.reason)) {
 			out.text(`  ! ${conflict.field}: ${conflict.reason}\n`);
 		}
 	}
@@ -976,18 +1009,36 @@ const logPolicyResult = (
 	opts: { color: boolean },
 ): void => {
 	const changes = result.applied.filter((c) => c.action !== "noop");
-	if (changes.length === 0) {
+	if (changes.length === 0 && result.conflicts.length === 0) {
 		log.info("neon.ts applied — no changes were needed.");
+		const followup = renderCustomDomainFollowup(result, opts);
+		if (followup) log.info("%s", followup);
 		return;
 	}
-	log.info(
-		"%s",
-		renderAppliedChanges(
-			changes,
-			`neon.ts applied — ${changes.length} change${changes.length === 1 ? "" : "s"}:`,
+	if (changes.length > 0) {
+		log.info(
+			"%s",
+			renderAppliedChanges(
+				changes,
+				`neon.ts applied — ${changes.length} change${changes.length === 1 ? "" : "s"}:`,
+				opts,
+			),
+		);
+	}
+	if (result.conflicts.length > 0) {
+		const conflictText = renderBranchSettingConflicts(
+			result.conflicts,
 			opts,
-		),
-	);
+		);
+		if (conflictText) log.info("%s", conflictText);
+		for (const conflict of result.conflicts) {
+			if (!reasonAllowsUpdateExisting(conflict.reason)) {
+				log.info("  ! %s: %s", conflict.field, conflict.reason);
+			}
+		}
+	}
+	const followup = renderCustomDomainFollowup(result, opts);
+	if (followup) log.info("%s", followup);
 };
 
 /**

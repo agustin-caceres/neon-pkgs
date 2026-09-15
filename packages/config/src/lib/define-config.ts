@@ -1,3 +1,4 @@
+import { normalizeCustomDomain } from "./custom-domain.js";
 import { parseBranchTtl } from "./duration.js";
 import { ConfigValidationError } from "./errors.js";
 import { normalizeExternalPackage } from "./external-packages.js";
@@ -223,7 +224,7 @@ export function resolveConfig(
 		};
 	}
 
-	const preview = resolvePreviewConfig(config.preview, tuning);
+	const preview = resolvePreviewConfig(config.preview, tuning, branch);
 	if (preview) resolved.preview = preview;
 
 	return resolved;
@@ -318,14 +319,16 @@ function normalizeDataApiSettings(
 function resolvePreviewConfig(
 	preview: PreviewInput | undefined,
 	tuning: BranchTuning,
+	branch: BranchTarget,
 ): ResolvedPreviewConfig | undefined {
 	if (!preview) return undefined;
 	const fnTuning = tuning.preview?.functions ?? {};
 	const functions: ResolvedFunctionConfig[] = Object.entries(
 		preview.functions ?? {},
 	).map(([slug, def]) =>
-		resolveFunctionConfig(slug, def, fnTuning[slug] ?? {}),
+		resolveFunctionConfig(slug, def, fnTuning[slug] ?? {}, branch),
 	);
+	assertUniqueResolvedCustomDomains(functions);
 	const buckets = Object.entries(preview.buckets ?? {}).map(
 		([name, def]) => ({
 			name,
@@ -343,7 +346,9 @@ function resolveFunctionConfig(
 	slug: string,
 	def: FunctionDef,
 	tuning: FunctionTuning,
+	branch: BranchTarget,
 ): ResolvedFunctionConfig {
+	const customDomains = resolveFunctionCustomDomains(def, tuning, branch);
 	return {
 		slug,
 		name: def.name,
@@ -374,7 +379,40 @@ function resolveFunctionConfig(
 					})),
 				}
 			: {}),
+		...(customDomains !== undefined ? { customDomains } : {}),
 	};
+}
+
+function resolveFunctionCustomDomains(
+	def: FunctionDef,
+	tuning: FunctionTuning,
+	branch: BranchTarget,
+): string[] | undefined {
+	if (tuning.customDomains !== undefined) {
+		return tuning.customDomains.map(normalizeCustomDomain);
+	}
+	// Hostnames are globally unique, so a child checkout 409s if it inherits this list.
+	if (def.customDomains !== undefined && branch.isDefault === true) {
+		return def.customDomains.map(normalizeCustomDomain);
+	}
+	return undefined;
+}
+
+function assertUniqueResolvedCustomDomains(
+	functions: ResolvedFunctionConfig[],
+): void {
+	const byDomain = new Map<string, string>();
+	for (const fn of functions) {
+		for (const domain of fn.customDomains ?? []) {
+			const prior = byDomain.get(domain);
+			if (prior !== undefined) {
+				throw new ConfigValidationError([
+					`custom domain "${domain}" is used by both function "${prior}" and "${fn.slug}"`,
+				]);
+			}
+			byDomain.set(domain, fn.slug);
+		}
+	}
 }
 
 /**

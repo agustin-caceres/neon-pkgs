@@ -1,7 +1,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defineConfig, ErrorCode, PushConflictError } from "@neon/config";
+import {
+	defineConfig,
+	ErrorCode,
+	type NeonFunctionDeploymentSnapshot,
+	PlatformError,
+	PushConflictError,
+} from "@neon/config";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { FakeNeonApi } from "./fake-neon-api.js";
 import { pushConfig } from "./push-config.js";
@@ -23,9 +29,25 @@ afterAll(() => {
 	rmSync(fnTmpDir, { recursive: true, force: true });
 });
 
-function seededFake(opts?: { protected?: boolean }) {
+function seededFake(opts?: {
+	protected?: boolean;
+	branches?: Array<{
+		id: string;
+		name: string;
+		isDefault: boolean;
+		protected?: boolean;
+	}>;
+}) {
 	const api = new FakeNeonApi();
 	const projectId = "proj-push";
+	const branches = opts?.branches ?? [
+		{
+			id: "br-main",
+			name: "main",
+			isDefault: true,
+			protected: opts?.protected ?? false,
+		},
+	];
 	api.seedProject({
 		project: {
 			id: projectId,
@@ -34,18 +56,58 @@ function seededFake(opts?: { protected?: boolean }) {
 			pgVersion: 17,
 			orgId: "org-push",
 		},
-		branches: [
-			{
-				branch: {
-					id: "br-main",
-					name: "main",
-					isDefault: true,
-					protected: opts?.protected ?? false,
-				},
+		branches: branches.map((branch) => ({
+			branch: {
+				id: branch.id,
+				name: branch.name,
+				isDefault: branch.isDefault,
+				protected: branch.protected ?? opts?.protected ?? false,
 			},
-		],
+		})),
 	});
 	return { api, projectId };
+}
+
+async function withFastFunctionPoll<T>(
+	run: () => Promise<T>,
+	opts?: { timeoutMs?: string },
+): Promise<T> {
+	const previousTimeout = process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS;
+	const previousInterval = process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS;
+	process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS = opts?.timeoutMs ?? "400";
+	process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS = "5";
+	try {
+		return await run();
+	} finally {
+		if (previousTimeout === undefined) {
+			delete process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS;
+		} else {
+			process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS = previousTimeout;
+		}
+		if (previousInterval === undefined) {
+			delete process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS;
+		} else {
+			process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS = previousInterval;
+		}
+	}
+}
+
+function stubFunctionDeploymentReads(
+	api: FakeNeonApi,
+	slug: string,
+	sequence: NeonFunctionDeploymentSnapshot[],
+): void {
+	const originalGet = api.getBranchFunction?.bind(api);
+	let index = 0;
+	api.getBranchFunction = async (projectId, branchId, fnSlug) => {
+		const fn = await originalGet?.(projectId, branchId, fnSlug);
+		if (!fn) throw new Error("missing function");
+		if (fnSlug !== slug) return fn;
+		const currentDeployment =
+			sequence[Math.min(index, sequence.length - 1)];
+		index += 1;
+		return { ...fn, currentDeployment };
+	};
 }
 
 describe("pushConfig", () => {
@@ -961,5 +1023,1147 @@ describe("pushConfig", () => {
 		});
 
 		expect(result.warnings).toEqual([]);
+	});
+
+	test("registers a custom domain after deploying the function", async () => {
+		const { api, projectId } = seededFake();
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello World",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
+
+		expect(result.applied).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					identifier: "function:fn1",
+					action: "create",
+				}),
+				expect.objectContaining({
+					identifier: "domain:docs.example.com",
+					action: "create",
+				}),
+			]),
+		);
+		const registered = api.history.filter(
+			(h) => h.method === "registerBranchCustomDomain",
+		);
+		expect(registered).toHaveLength(1);
+		expect(registered[0].args[2]).toEqual({
+			domain: "docs.example.com",
+			functionSlug: "fn1",
+		});
+		expect(result.customDomains).toEqual([
+			{
+				domain: "docs.example.com",
+				slug: "fn1",
+				cnameTarget: "custom-domains.fake.neon.tech",
+			},
+		]);
+
+		const again = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
+		expect(
+			again.applied.some(
+				(c) => c.identifier === "domain:docs.example.com",
+			),
+		).toBe(false);
+		expect(again.customDomains).toEqual([
+			{
+				domain: "docs.example.com",
+				slug: "fn1",
+				cnameTarget: "custom-domains.fake.neon.tech",
+			},
+		]);
+	});
+
+	test("does not register static customDomains on a non-default branch", async () => {
+		const { api, projectId } = seededFake({
+			branches: [
+				{ id: "br-main", name: "main", isDefault: true },
+				{ id: "br-dev", name: "dev", isDefault: false },
+			],
+		});
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello World",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-dev",
+		});
+		expect(
+			api.history.some((h) => h.method === "registerBranchCustomDomain"),
+		).toBe(false);
+		expect(
+			api.history.some((h) => h.method === "listBranchCustomDomains"),
+		).toBe(false);
+		expect(result.customDomains).toBeUndefined();
+	});
+
+	test("dry-run on a non-default branch plans the function and not the static domain", async () => {
+		const { api, projectId } = seededFake({
+			branches: [
+				{ id: "br-main", name: "main", isDefault: true },
+				{ id: "br-dev", name: "dev", isDefault: false },
+			],
+		});
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello World",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-dev",
+			dryRun: true,
+		});
+		expect(result.applied).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					identifier: "function:fn1",
+					action: "create",
+				}),
+			]),
+		);
+		expect(
+			result.applied.some(
+				(c) => c.identifier === "domain:docs.example.com",
+			),
+		).toBe(false);
+		expect(result.customDomains).toBeUndefined();
+	});
+
+	test("registers a tuning custom domain on a non-default branch", async () => {
+		const { api, projectId } = seededFake({
+			branches: [
+				{ id: "br-main", name: "main", isDefault: true },
+				{ id: "br-dev", name: "dev", isDefault: false },
+			],
+		});
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello World",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+			branch: (branch) => ({
+				preview: {
+					functions: {
+						fn1: branch.isDefault
+							? {}
+							: { customDomains: ["preview.example.com"] },
+					},
+				},
+			}),
+		});
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-dev",
+		});
+		expect(result.customDomains).toEqual([
+			{
+				domain: "preview.example.com",
+				slug: "fn1",
+				cnameTarget: "custom-domains.fake.neon.tech",
+			},
+		]);
+		const registered = api.history.filter(
+			(h) => h.method === "registerBranchCustomDomain",
+		);
+		expect(registered).toHaveLength(1);
+		expect(registered[0].args[2]).toEqual({
+			domain: "preview.example.com",
+			functionSlug: "fn1",
+		});
+	});
+
+	test("does not list custom domains when every function uses []", async () => {
+		const { api, projectId } = seededFake();
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello World",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+			branch: () => ({
+				preview: {
+					functions: { fn1: { customDomains: [] } },
+				},
+			}),
+		});
+
+		await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
+		expect(
+			api.history.some((h) => h.method === "listBranchCustomDomains"),
+		).toBe(false);
+	});
+
+	test("retargets a domain with updateExisting via delete then register", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-2",
+			slug: "fn2",
+			name: "Other",
+			invocationUrl: "https://x/functions/fn2",
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+
+		await expect(
+			pushConfig(config, { api, projectId, branchId: "br-main" }),
+		).rejects.toBeInstanceOf(PushConflictError);
+
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+			updateExisting: true,
+		});
+		expect(result.applied).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					identifier: "domain:docs.example.com",
+					action: "update",
+				}),
+			]),
+		);
+		const methods = api.history
+			.filter(
+				(h) =>
+					h.method === "deleteBranchCustomDomain" ||
+					h.method === "registerBranchCustomDomain",
+			)
+			.map((h) => h.method);
+		expect(methods).toEqual([
+			"deleteBranchCustomDomain",
+			"registerBranchCustomDomain",
+		]);
+		expect(result.customDomains).toEqual([
+			{
+				domain: "docs.example.com",
+				slug: "fn2",
+				cnameTarget: "custom-domains.fake.neon.tech",
+			},
+		]);
+	});
+
+	test("does not retarget when the replacement deployment failed", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-fail.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		const originalGet = api.getBranchFunction?.bind(api);
+		api.getBranchFunction = async (projectId, branchId, slug) => {
+			const fn = await originalGet?.(projectId, branchId, slug);
+			if (!fn) throw new Error("missing function");
+			if (slug === "fn2") {
+				return {
+					...fn,
+					currentDeployment: { id: 1, status: "failed" },
+				};
+			}
+			return fn;
+		};
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+
+		await expect(
+			pushConfig(config, {
+				api,
+				projectId,
+				branchId: "br-main",
+				updateExisting: true,
+			}),
+		).rejects.toSatisfy((err: unknown) => {
+			expect(err).toBeInstanceOf(PlatformError);
+			if (!(err instanceof PlatformError)) return false;
+			expect(err.message).toMatch(/failed; left the previous/);
+			return true;
+		});
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(false);
+		expect(await api.listBranchCustomDomains(projectId, "br-main")).toEqual(
+			[
+				expect.objectContaining({
+					domain: "docs.example.com",
+					entityId: "fn1",
+				}),
+			],
+		);
+	});
+
+	test("does not retarget while the replacement deployment is still building", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-building.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		const originalGet = api.getBranchFunction?.bind(api);
+		api.getBranchFunction = async (projectId, branchId, slug) => {
+			const fn = await originalGet?.(projectId, branchId, slug);
+			if (!fn) throw new Error("missing function");
+			if (slug === "fn2") {
+				return {
+					...fn,
+					currentDeployment: { id: 1, status: "building" },
+				};
+			}
+			return fn;
+		};
+		const previousTimeout = process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS;
+		const previousInterval = process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS;
+		process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS = "30";
+		process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS = "5";
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		try {
+			await expect(
+				pushConfig(config, {
+					api,
+					projectId,
+					branchId: "br-main",
+					updateExisting: true,
+				}),
+			).rejects.toSatisfy((err: unknown) => {
+				expect(err).toBeInstanceOf(PlatformError);
+				if (!(err instanceof PlatformError)) return false;
+				expect(err.message).toMatch(
+					/Timed out waiting for function "fn2"/,
+				);
+				return true;
+			});
+		} finally {
+			if (previousTimeout === undefined) {
+				delete process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS;
+			} else {
+				process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS = previousTimeout;
+			}
+			if (previousInterval === undefined) {
+				delete process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS;
+			} else {
+				process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS = previousInterval;
+			}
+		}
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(false);
+	});
+
+	test("does not retarget on a previous completed deployment while the replacement is still building", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-2",
+			slug: "fn2",
+			name: "Other",
+			invocationUrl: "https://x/functions/fn2",
+			currentDeployment: { id: 1, status: "completed" },
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-stale-completed.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		stubFunctionDeploymentReads(api, "fn2", [
+			{ id: 1, status: "completed" },
+			{ id: 2, status: "building" },
+		]);
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		await withFastFunctionPoll(
+			async () => {
+				await expect(
+					pushConfig(config, {
+						api,
+						projectId,
+						branchId: "br-main",
+						updateExisting: true,
+					}),
+				).rejects.toSatisfy((err: unknown) => {
+					expect(err).toBeInstanceOf(PlatformError);
+					if (!(err instanceof PlatformError)) return false;
+					expect(err.message).toMatch(
+						/Timed out waiting for function "fn2"/,
+					);
+					return true;
+				});
+			},
+			{ timeoutMs: "40" },
+		);
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(false);
+	});
+
+	test("retargets after this apply's replacement deployment completes", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-2",
+			slug: "fn2",
+			name: "Other",
+			invocationUrl: "https://x/functions/fn2",
+			currentDeployment: { id: 1, status: "completed" },
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-lag-complete.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		stubFunctionDeploymentReads(api, "fn2", [
+			{ id: 1, status: "completed" },
+			{ id: 2, status: "building" },
+			{ id: 2, status: "completed" },
+		]);
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		const result = await withFastFunctionPoll(() =>
+			pushConfig(config, {
+				api,
+				projectId,
+				branchId: "br-main",
+				updateExisting: true,
+			}),
+		);
+		expect(result.applied).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					identifier: "domain:docs.example.com",
+					action: "update",
+				}),
+			]),
+		);
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(true);
+	});
+
+	test("does not treat a previous failed deployment as this apply's failure", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-2",
+			slug: "fn2",
+			name: "Other",
+			invocationUrl: "https://x/functions/fn2",
+			currentDeployment: { id: 1, status: "failed" },
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-stale-failed.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		stubFunctionDeploymentReads(api, "fn2", [
+			{ id: 1, status: "failed" },
+			{ id: 2, status: "completed" },
+		]);
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		const result = await withFastFunctionPoll(() =>
+			pushConfig(config, {
+				api,
+				projectId,
+				branchId: "br-main",
+				updateExisting: true,
+			}),
+		);
+		expect(result.applied).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					identifier: "domain:docs.example.com",
+					action: "update",
+				}),
+			]),
+		);
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(true);
+	});
+
+	test("does not retarget when this apply's replacement deployment fails after a previous completed snapshot", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-2",
+			slug: "fn2",
+			name: "Other",
+			invocationUrl: "https://x/functions/fn2",
+			currentDeployment: { id: 1, status: "completed" },
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-new-failed.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		stubFunctionDeploymentReads(api, "fn2", [
+			{ id: 1, status: "completed" },
+			{ id: 2, status: "failed" },
+		]);
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		await withFastFunctionPoll(async () => {
+			await expect(
+				pushConfig(config, {
+					api,
+					projectId,
+					branchId: "br-main",
+					updateExisting: true,
+				}),
+			).rejects.toSatisfy((err: unknown) => {
+				expect(err).toBeInstanceOf(PlatformError);
+				if (!(err instanceof PlatformError)) return false;
+				expect(err.message).toMatch(/failed; left the previous/);
+				return true;
+			});
+		});
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(false);
+	});
+
+	test("does not retarget when a newer deployment superseded this apply", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-2",
+			slug: "fn2",
+			name: "Other",
+			invocationUrl: "https://x/functions/fn2",
+			currentDeployment: { id: 1, status: "completed" },
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-superseded.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		stubFunctionDeploymentReads(api, "fn2", [
+			{ id: 3, status: "completed" },
+		]);
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		await expect(
+			pushConfig(config, {
+				api,
+				projectId,
+				branchId: "br-main",
+				updateExisting: true,
+			}),
+		).rejects.toSatisfy((err: unknown) => {
+			expect(err).toBeInstanceOf(PlatformError);
+			if (!(err instanceof PlatformError)) return false;
+			expect(err.message).toMatch(
+				/current deployment is 3, this apply submitted 2/,
+			);
+			return true;
+		});
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(false);
+	});
+
+	test("does not DELETE when ownership changed during the deployment wait", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-2",
+			slug: "fn2",
+			name: "Other",
+			invocationUrl: "https://x/functions/fn2",
+			currentDeployment: { id: 1, status: "completed" },
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-owner-moved.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		stubFunctionDeploymentReads(api, "fn2", [
+			{ id: 1, status: "completed" },
+			{ id: 2, status: "completed" },
+		]);
+		const originalList = api.listBranchCustomDomains.bind(api);
+		let lists = 0;
+		api.listBranchCustomDomains = async (projId, branchId) => {
+			const items = await originalList(projId, branchId);
+			lists += 1;
+			if (lists < 2) return items;
+			return items.map((item) =>
+				item.domain === "docs.example.com"
+					? { ...item, entityId: "other-owner" }
+					: item,
+			);
+		};
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		await withFastFunctionPoll(async () => {
+			await expect(
+				pushConfig(config, {
+					api,
+					projectId,
+					branchId: "br-main",
+					updateExisting: true,
+				}),
+			).rejects.toSatisfy((err: unknown) => {
+				expect(err).toBeInstanceOf(PlatformError);
+				if (!(err instanceof PlatformError)) return false;
+				expect(err.message).toMatch(
+					/planned owner was function "fn1"; observed function "other-owner"/,
+				);
+				expect(err.message).toMatch(/DELETE was not attempted/);
+				return true;
+			});
+		});
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(false);
+	});
+
+	test("failed POST after DELETE tells the user to list current ownership", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-2",
+			slug: "fn2",
+			name: "Other",
+			invocationUrl: "https://x/functions/fn2",
+			currentDeployment: { id: 1, status: "completed" },
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const otherSource = join(fnTmpDir, "other-post-fail.ts");
+		writeFileSync(
+			otherSource,
+			"export default { fetch(_req: Request): Response { return new Response('ok'); } };\n",
+		);
+		stubFunctionDeploymentReads(api, "fn2", [
+			{ id: 2, status: "completed" },
+		]);
+		const originalRegister = api.registerBranchCustomDomain.bind(api);
+		api.registerBranchCustomDomain = async (projId, branchId, input) => {
+			if (input.functionSlug === "fn2") {
+				throw new PlatformError(
+					ErrorCode.ServerError,
+					"register exploded",
+				);
+			}
+			return originalRegister(projId, branchId, input);
+		};
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: { name: "Hello", source: fnSource },
+					fn2: {
+						name: "Other",
+						source: otherSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		await expect(
+			pushConfig(config, {
+				api,
+				projectId,
+				branchId: "br-main",
+				updateExisting: true,
+			}),
+		).rejects.toSatisfy((err: unknown) => {
+			expect(err).toBeInstanceOf(PlatformError);
+			if (!(err instanceof PlatformError)) return false;
+			expect(err.message).toMatch(/Deleted the previous registration/);
+			expect(err.message).toMatch(/neon function domains list/);
+			expect(err.message).not.toMatch(/currently unregistered/);
+			return true;
+		});
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(true);
+	});
+
+	test("omitted customDomains do not delete a remote registration", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const config = defineConfig({
+			preview: {
+				functions: { fn1: { name: "Hello", source: fnSource } },
+			},
+		});
+		await pushConfig(config, { api, projectId, branchId: "br-main" });
+		expect(
+			api.history.some((h) => h.method === "deleteBranchCustomDomain"),
+		).toBe(false);
+		expect(await api.listBranchCustomDomains(projectId, "br-main")).toEqual(
+			[
+				expect.objectContaining({
+					domain: "docs.example.com",
+					entityId: "fn1",
+				}),
+			],
+		);
+	});
+
+	test("rewrites a 409 from register to hostname-already-registered", async () => {
+		const { api, projectId } = seededFake();
+		api.seedProject({
+			project: {
+				id: "proj-other",
+				name: "other",
+				regionId: "aws-us-east-1",
+				pgVersion: 17,
+				orgId: "org-push",
+			},
+			branches: [
+				{
+					branch: {
+						id: "br-other",
+						name: "other",
+						isDefault: true,
+						protected: false,
+					},
+				},
+			],
+		});
+		api.seedFunction("proj-other", "br-other", {
+			id: "fn-x",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedCustomDomain("proj-other", "br-other", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "edge.example",
+		});
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+
+		await expect(
+			pushConfig(config, { api, projectId, branchId: "br-main" }),
+		).rejects.toSatisfy((err: unknown) => {
+			expect(err).toBeInstanceOf(PlatformError);
+			if (!(err instanceof PlatformError)) return false;
+			expect(err.code).toBe(ErrorCode.Conflict);
+			expect(err.message).toMatch(
+				/already registered to another resource/,
+			);
+			expect(err.message).not.toMatch(/name collision/);
+			expect(err.details.status).toBe(409);
+			return true;
+		});
+	});
+
+	test("warns when cnameTarget is empty and keeps the empty string", async () => {
+		const { api, projectId } = seededFake();
+		api.seedFunction(projectId, "br-main", {
+			id: "fn-1",
+			slug: "fn1",
+			name: "Hello",
+			invocationUrl: "https://x/functions/fn1",
+		});
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "fn1",
+			cnameTarget: "",
+		});
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+		});
+		expect(result.customDomains).toEqual([
+			{
+				domain: "docs.example.com",
+				slug: "fn1",
+				cnameTarget: "",
+			},
+		]);
+		expect(result.warnings).toEqual(
+			expect.arrayContaining([
+				expect.stringMatching(/no custom-domains front door/),
+			]),
+		);
+	});
+
+	test("dry-run of a blocked domain omits the conflicting owner's CNAME", async () => {
+		const { api, projectId } = seededFake();
+		api.seedCustomDomain(projectId, "br-main", {
+			domain: "docs.example.com",
+			entityType: "bucket",
+			entityId: "uploads",
+			cnameTarget: "edge.example",
+		});
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+			dryRun: true,
+		});
+		expect(result.conflicts).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ field: "customDomain" }),
+			]),
+		);
+		expect(result.customDomains).toEqual([
+			{ domain: "docs.example.com", slug: "fn1" },
+		]);
+	});
+
+	test("dry-run of a new domain omits cnameTarget", async () => {
+		const { api, projectId } = seededFake();
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		const result = await pushConfig(config, {
+			api,
+			projectId,
+			branchId: "br-main",
+			dryRun: true,
+		});
+		expect(result.customDomains).toEqual([
+			{ domain: "docs.example.com", slug: "fn1" },
+		]);
+		expect(
+			api.history.some((h) => h.method === "registerBranchCustomDomain"),
+		).toBe(false);
+	});
+
+	test("throws before mutations when the adapter lacks custom-domain methods", async () => {
+		const { api, projectId } = seededFake();
+		const stripped = api as {
+			listBranchCustomDomains?: unknown;
+			registerBranchCustomDomain?: unknown;
+			deleteBranchCustomDomain?: unknown;
+		};
+		stripped.listBranchCustomDomains = undefined;
+		stripped.registerBranchCustomDomain = undefined;
+		stripped.deleteBranchCustomDomain = undefined;
+		const config = defineConfig({
+			preview: {
+				functions: {
+					fn1: {
+						name: "Hello",
+						source: fnSource,
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
+		});
+		await expect(
+			pushConfig(config, { api, projectId, branchId: "br-main" }),
+		).rejects.toSatisfy((err: unknown) => {
+			expect(err).toBeInstanceOf(PlatformError);
+			if (!(err instanceof PlatformError)) return false;
+			expect(err.code).toBe(ErrorCode.FeatureUnavailable);
+			expect(err.message).toMatch(/does not implement custom domains/);
+			return true;
+		});
+		expect(
+			api.history.some((h) => h.method === "deployBranchFunction"),
+		).toBe(false);
 	});
 });

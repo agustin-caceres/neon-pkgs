@@ -46,6 +46,7 @@ import type {
 	NeonBucketSnapshot,
 	NeonCredentialMeta,
 	NeonCredentialSecret,
+	NeonCustomDomainSnapshot,
 	NeonDataApiSnapshot,
 	NeonDatabaseSnapshot,
 	NeonEndpointSnapshot,
@@ -142,6 +143,7 @@ describe("config type-export surface", () => {
 		expectTypeOf<NeonBucketSnapshot>().not.toBeAny();
 		expectTypeOf<NeonCredentialMeta>().not.toBeAny();
 		expectTypeOf<NeonCredentialSecret>().not.toBeAny();
+		expectTypeOf<NeonCustomDomainSnapshot>().not.toBeAny();
 		expectTypeOf<NeonDataApiSnapshot>().not.toBeAny();
 		expectTypeOf<NeonDatabaseSnapshot>().not.toBeAny();
 		expectTypeOf<NeonEndpointSnapshot>().not.toBeAny();
@@ -258,6 +260,27 @@ describe("defineConfig return-type stability", () => {
 					},
 				},
 			}),
+		});
+		expectTypeOf(config).toExtend<Config>();
+	});
+
+	test("FunctionDef and FunctionTuning accept customDomains", () => {
+		expectTypeOf<FunctionDef["customDomains"]>().toEqualTypeOf<
+			string[] | undefined
+		>();
+		expectTypeOf<FunctionTuning["customDomains"]>().toEqualTypeOf<
+			string[] | undefined
+		>();
+		const config = defineConfig({
+			preview: {
+				functions: {
+					hello: {
+						name: "Hello",
+						source: "./hello.ts",
+						customDomains: ["docs.example.com"],
+					},
+				},
+			},
 		});
 		expectTypeOf(config).toExtend<Config>();
 	});

@@ -188,6 +188,8 @@ export interface NeonFunctionSnapshot {
 	invocationUrl: string;
 	/** Id (platform version number) of the active deployment, when any code is deployed. */
 	activeDeploymentId?: number;
+	/** Most recent deployment, including in-progress and failed builds. */
+	currentDeployment?: NeonFunctionDeploymentSnapshot;
 }
 
 /**
@@ -235,6 +237,13 @@ export interface UpdateTriggerInput {
 	cron?: string;
 	functionPath?: string;
 	enabled?: boolean;
+}
+
+export interface NeonCustomDomainSnapshot {
+	domain: string;
+	entityType: string;
+	entityId: string;
+	cnameTarget: string;
 }
 
 // ─── Preview: branch-scoped credentials ─────────────────────────────────────
@@ -502,6 +511,17 @@ export interface NeonApi {
 		input: DeployFunctionInput,
 	): Promise<NeonFunctionDeploymentSnapshot>;
 
+	/**
+	 * Read one function, including {@link NeonFunctionSnapshot.currentDeployment}.
+	 * Optional so a pre-feature adapter still type-checks; retarget waits on it
+	 * before deleting the previous custom-domain registration.
+	 */
+	getBranchFunction?(
+		projectId: string,
+		branchId: string,
+		slug: string,
+	): Promise<NeonFunctionSnapshot>;
+
 	listBranchTriggers(
 		projectId: string,
 		branchId: string,
@@ -524,6 +544,28 @@ export interface NeonApi {
 		projectId: string,
 		branchId: string,
 		triggerId: string,
+	): Promise<void>;
+
+	/**
+	 * List custom domains on a branch. Optional so a pre-feature `NeonApi` still
+	 * type-checks; `pushConfig` requires the method only when the policy declares
+	 * domains.
+	 */
+	listBranchCustomDomains?(
+		projectId: string,
+		branchId: string,
+	): Promise<NeonCustomDomainSnapshot[]>;
+
+	registerBranchCustomDomain?(
+		projectId: string,
+		branchId: string,
+		input: { domain: string; functionSlug: string },
+	): Promise<NeonCustomDomainSnapshot>;
+
+	deleteBranchCustomDomain?(
+		projectId: string,
+		branchId: string,
+		domain: string,
 	): Promise<void>;
 
 	// ─── Preview: AI Gateway ───────────────────────────────────────────────────

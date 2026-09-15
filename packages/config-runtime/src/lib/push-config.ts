@@ -6,6 +6,7 @@ import {
 	ErrorCode,
 	type NeonApi,
 	type NeonBranchSnapshot,
+	type NeonCustomDomainSnapshot,
 	type PlanStep,
 	PlatformError,
 	PushAbortedError,
@@ -246,21 +247,23 @@ export async function pushConfig(
 
 	const branchById = new Map(branches.map((b) => [b.id, b] as const));
 	const branchByName = new Map(branches.map((b) => [b.name, b] as const));
+	const ctx: ApplyContext = {
+		api,
+		remoteProjectId: remoteProject.id,
+		branchById,
+		branchByName,
+		bundleFunction:
+			options.bundleFunction ??
+			makeDefaultBundleFunction((message) => {
+				warnings.push(message);
+			}),
+		deploymentIdBySlug: new Map(),
+	};
 
 	for (const step of diff.plan) {
 		const change = dryRun
 			? synthesizeAppliedChange(step)
-			: await applyStep(step, {
-					api,
-					remoteProjectId: remoteProject.id,
-					branchById,
-					branchByName,
-					bundleFunction:
-						options.bundleFunction ??
-						makeDefaultBundleFunction((message) => {
-							warnings.push(message);
-						}),
-				});
+			: await applyStep(step, ctx);
 		applied.push(change);
 	}
 
@@ -286,6 +289,13 @@ export async function pushConfig(
 		warnings,
 	};
 	if (remoteProject.orgId) result.orgId = remoteProject.orgId;
+	enrichDeclaredCustomDomains({
+		result,
+		preview: remote.preview,
+		functions: resolved.preview?.functions ?? [],
+		applied,
+		warnings,
+	});
 	return result;
 }
 
@@ -295,7 +305,8 @@ function isOverrideStep(step: PlanStep): boolean {
 		step.kind === "update-branch-protected" ||
 		step.kind === "update-endpoint" ||
 		step.kind === "update-data-api" ||
-		step.kind === "disable-data-api"
+		step.kind === "disable-data-api" ||
+		step.kind === "retarget-custom-domain"
 	);
 }
 
@@ -392,6 +403,27 @@ function synthesizeAppliedChange(step: PlanStep): AppliedChange {
 					enabled: step.trigger.enabled,
 				},
 			};
+		case "register-custom-domain":
+			return {
+				kind: "service",
+				action: "create",
+				identifier: `domain:${step.domain}`,
+				details: {
+					domain: step.domain,
+					slug: step.functionSlug,
+				},
+			};
+		case "retarget-custom-domain":
+			return {
+				kind: "service",
+				action: "update",
+				identifier: `domain:${step.domain}`,
+				details: {
+					domain: step.domain,
+					slug: step.functionSlug,
+					previousSlug: step.previousSlug,
+				},
+			};
 	}
 }
 
@@ -486,7 +518,13 @@ async function resolvePreviewState(args: {
 	const wantsTriggers = desired.functions.some(
 		(fn) => (fn.triggers?.length ?? 0) > 0,
 	);
-	const [buckets, functions, triggers] = await Promise.all([
+	const wantsCustomDomains = desired.functions.some(
+		(fn) => (fn.customDomains?.length ?? 0) > 0,
+	);
+	const customDomainApi = wantsCustomDomains
+		? requireCustomDomainApi(api)
+		: undefined;
+	const [buckets, functions, triggers, customDomains] = await Promise.all([
 		desired.buckets.length > 0
 			? api.listBranchBuckets(projectId, branchId)
 			: Promise.resolve([]),
@@ -496,8 +534,13 @@ async function resolvePreviewState(args: {
 		wantsTriggers
 			? api.listBranchTriggers(projectId, branchId)
 			: Promise.resolve([]),
+		customDomainApi
+			? customDomainApi.listBranchCustomDomains(projectId, branchId)
+			: Promise.resolve([]),
 	]);
-	return { buckets, functions, triggers };
+	const preview: RemotePreviewState = { buckets, functions, triggers };
+	if (wantsCustomDomains) preview.customDomains = customDomains;
+	return preview;
 }
 
 /**
@@ -524,6 +567,7 @@ interface ApplyContext {
 	branchById: Map<string, NeonBranchSnapshot>;
 	branchByName: Map<string, NeonBranchSnapshot>;
 	bundleFunction: FunctionBundler;
+	deploymentIdBySlug: Map<string, number>;
 }
 
 async function applyStep(
@@ -661,6 +705,7 @@ async function applyStep(
 					environment: step.fn.env,
 				},
 			);
+			ctx.deploymentIdBySlug.set(step.fn.slug, deployment.id);
 			return {
 				kind: "service",
 				action: step.functionExists ? "update" : "create",
@@ -717,6 +762,111 @@ async function applyStep(
 					functionSlug: step.functionSlug,
 					cron: step.trigger.cron,
 					enabled: step.trigger.enabled,
+				},
+			};
+		}
+		case "register-custom-domain": {
+			const methods = requireCustomDomainApi(ctx.api);
+			let snapshot: NeonCustomDomainSnapshot;
+			try {
+				snapshot = await methods.registerBranchCustomDomain(
+					ctx.remoteProjectId,
+					step.branchId,
+					{ domain: step.domain, functionSlug: step.functionSlug },
+				);
+			} catch (err) {
+				throw rewriteCustomDomainConflict(err, step.domain);
+			}
+			return {
+				kind: "service",
+				action: "create",
+				identifier: `domain:${step.domain}`,
+				details: {
+					domain: snapshot.domain,
+					slug: step.functionSlug,
+					cnameTarget: snapshot.cnameTarget,
+				},
+			};
+		}
+		case "retarget-custom-domain": {
+			const methods = requireCustomDomainApi(ctx.api);
+			const deploymentId = ctx.deploymentIdBySlug.get(step.functionSlug);
+			if (deploymentId === undefined) {
+				throw new PlatformError(
+					ErrorCode.ServerError,
+					`Cannot retarget a custom domain onto ${JSON.stringify(step.functionSlug)}: this apply did not deploy that function.`,
+				);
+			}
+			await waitForCompletedFunctionDeployment({
+				api: ctx.api,
+				projectId: ctx.remoteProjectId,
+				branchId: step.branchId,
+				slug: step.functionSlug,
+				deploymentId,
+			});
+			const observed = (
+				await methods.listBranchCustomDomains(
+					ctx.remoteProjectId,
+					step.branchId,
+				)
+			).find((item) => item.domain === step.domain);
+			if (
+				observed === undefined ||
+				observed.entityType !== "function" ||
+				observed.entityId !== step.previousSlug
+			) {
+				const seen =
+					observed === undefined
+						? "no registration"
+						: `${observed.entityType} ${JSON.stringify(observed.entityId)}`;
+				throw new PlatformError(
+					ErrorCode.Conflict,
+					`Cannot retarget ${JSON.stringify(step.domain)}: planned owner was function ${JSON.stringify(step.previousSlug)}; observed ${seen}. DELETE was not attempted.`,
+				);
+			}
+			await methods.deleteBranchCustomDomain(
+				ctx.remoteProjectId,
+				step.branchId,
+				step.domain,
+			);
+			let snapshot: NeonCustomDomainSnapshot;
+			try {
+				snapshot = await methods.registerBranchCustomDomain(
+					ctx.remoteProjectId,
+					step.branchId,
+					{ domain: step.domain, functionSlug: step.functionSlug },
+				);
+			} catch (err) {
+				const rewritten = rewriteCustomDomainConflict(err, step.domain);
+				const message =
+					rewritten instanceof PlatformError
+						? rewritten.message
+						: rewritten instanceof Error
+							? rewritten.message
+							: String(rewritten);
+				throw new PlatformError(
+					rewritten instanceof PlatformError
+						? rewritten.code
+						: ErrorCode.ServerError,
+					`Deleted the previous registration of ${JSON.stringify(step.domain)} (function ${JSON.stringify(step.previousSlug)}) but failed to register it on ${JSON.stringify(step.functionSlug)}. Inspect current ownership with \`neon function domains list\` before recovering. ${message}`,
+					{
+						cause: rewritten instanceof Error ? rewritten : err,
+						details:
+							rewritten instanceof PlatformError
+								? { ...rewritten.details }
+								: {},
+					},
+				);
+			}
+			return {
+				kind: "service",
+				action: "update",
+				identifier: `domain:${step.domain}`,
+				details: {
+					domain: snapshot.domain,
+					slug: step.functionSlug,
+					previousSlug: step.previousSlug,
+					cnameTarget: snapshot.cnameTarget,
 				},
 			};
 		}
@@ -786,4 +936,167 @@ function functionSlugFromIdentifier(identifier: string): string | undefined {
 	return identifier.startsWith(prefix)
 		? identifier.slice(prefix.length)
 		: undefined;
+}
+
+async function waitForCompletedFunctionDeployment(args: {
+	api: NeonApi;
+	projectId: string;
+	branchId: string;
+	slug: string;
+	deploymentId: number;
+}): Promise<void> {
+	const get = args.api.getBranchFunction;
+	if (!get) {
+		throw new PlatformError(
+			ErrorCode.FeatureUnavailable,
+			`Cannot retarget a custom domain onto ${JSON.stringify(args.slug)}: this NeonApi adapter does not implement getBranchFunction, so apply cannot confirm the function finished deploying.`,
+		);
+	}
+	const intervalMs =
+		Number(process.env.NEON_FUNCTIONS_POLL_INTERVAL_MS) || 2000;
+	const timeoutMs =
+		Number(process.env.NEON_FUNCTIONS_POLL_TIMEOUT_MS) || 600_000;
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const fn = await get.call(
+			args.api,
+			args.projectId,
+			args.branchId,
+			args.slug,
+		);
+		const dep = fn.currentDeployment;
+		// GET can still report the previous deployment after this apply's POST returns.
+		if (dep !== undefined && dep.id > args.deploymentId) {
+			throw new PlatformError(
+				ErrorCode.ServerError,
+				`Cannot retarget a custom domain onto ${JSON.stringify(args.slug)}: current deployment is ${dep.id}, this apply submitted ${args.deploymentId}; left the previous custom-domain registration in place.`,
+			);
+		}
+		if (dep !== undefined && dep.id === args.deploymentId) {
+			if (dep.status === "completed") return;
+			if (dep.status === "failed") {
+				throw new PlatformError(
+					ErrorCode.ServerError,
+					`Deployment of function ${JSON.stringify(args.slug)} failed; left the previous custom-domain registration in place.`,
+				);
+			}
+		}
+		if (Date.now() >= deadline) {
+			throw new PlatformError(
+				ErrorCode.ServerError,
+				`Timed out waiting for function ${JSON.stringify(args.slug)} to finish deploying; left the previous custom-domain registration in place.`,
+			);
+		}
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+}
+
+function requireCustomDomainApi(api: NeonApi): {
+	listBranchCustomDomains: NonNullable<NeonApi["listBranchCustomDomains"]>;
+	registerBranchCustomDomain: NonNullable<
+		NeonApi["registerBranchCustomDomain"]
+	>;
+	deleteBranchCustomDomain: NonNullable<NeonApi["deleteBranchCustomDomain"]>;
+} {
+	const list = api.listBranchCustomDomains;
+	const register = api.registerBranchCustomDomain;
+	const remove = api.deleteBranchCustomDomain;
+	if (!list || !register || !remove) {
+		throw new PlatformError(
+			ErrorCode.FeatureUnavailable,
+			"This NeonApi adapter does not implement custom domains. Implement listBranchCustomDomains, registerBranchCustomDomain, and deleteBranchCustomDomain, or remove customDomains from neon.ts.",
+		);
+	}
+	return {
+		listBranchCustomDomains: list.bind(api),
+		registerBranchCustomDomain: register.bind(api),
+		deleteBranchCustomDomain: remove.bind(api),
+	};
+}
+
+function rewriteCustomDomainConflict(err: unknown, domain: string): unknown {
+	if (!(err instanceof PlatformError) || err.code !== ErrorCode.Conflict) {
+		return err;
+	}
+	const neonMessage =
+		typeof err.details.neonMessage === "string"
+			? err.details.neonMessage
+			: undefined;
+	const requestId =
+		typeof err.details.requestId === "string"
+			? err.details.requestId
+			: undefined;
+	const status =
+		typeof err.details.status === "number" ? err.details.status : undefined;
+	const apiParts = [
+		status !== undefined ? `HTTP ${status}` : undefined,
+		neonMessage ? `Neon API said: "${neonMessage}"` : undefined,
+		requestId ? `request id ${requestId}` : undefined,
+	].filter((part): part is string => part !== undefined);
+	return new PlatformError(
+		ErrorCode.Conflict,
+		[
+			`Hostname ${JSON.stringify(domain)} is already registered to another resource.`,
+			apiParts.length > 0 ? `(${apiParts.join("; ")})` : undefined,
+			"Declare it only on the branch that owns it (use the branch closure), or delete it there first with `neon function domains delete`.",
+		]
+			.filter((part): part is string => part !== undefined)
+			.join(" "),
+		{ cause: err, details: { ...err.details } },
+	);
+}
+
+function enrichDeclaredCustomDomains(args: {
+	result: PushResult;
+	preview: RemotePreviewState | undefined;
+	functions: ResolvedFunctionConfig[];
+	applied: AppliedChange[];
+	warnings: string[];
+}): void {
+	const declared: Array<{ domain: string; slug: string }> = [];
+	for (const fn of args.functions) {
+		for (const domain of fn.customDomains ?? []) {
+			declared.push({ domain, slug: fn.slug });
+		}
+	}
+	if (declared.length === 0) return;
+
+	const blockedDomains = new Set(
+		args.result.conflicts.flatMap((conflict) => {
+			if (conflict.field !== "customDomain") return [];
+			const match = /^custom domain "([^"]+)"/.exec(conflict.reason);
+			return match?.[1] !== undefined ? [match[1]] : [];
+		}),
+	);
+
+	const cnameByDomain = new Map<string, string>();
+	for (const remote of args.preview?.customDomains ?? []) {
+		if (blockedDomains.has(remote.domain)) continue;
+		cnameByDomain.set(remote.domain, remote.cnameTarget);
+	}
+	for (const change of args.applied) {
+		const domain =
+			typeof change.details?.domain === "string"
+				? change.details.domain
+				: undefined;
+		const cnameTarget = change.details?.cnameTarget;
+		if (domain !== undefined && typeof cnameTarget === "string") {
+			cnameByDomain.set(domain, cnameTarget);
+		}
+	}
+
+	args.result.customDomains = declared.map(({ domain, slug }) => {
+		const entry: { domain: string; slug: string; cnameTarget?: string } = {
+			domain,
+			slug,
+		};
+		const cnameTarget = cnameByDomain.get(domain);
+		if (cnameTarget !== undefined) entry.cnameTarget = cnameTarget;
+		if (cnameTarget === "") {
+			args.warnings.push(
+				`No CNAME target for ${domain}; this region has no custom-domains front door.`,
+			);
+		}
+		return entry;
+	});
 }

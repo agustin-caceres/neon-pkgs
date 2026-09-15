@@ -31,6 +31,7 @@ export default defineConfig({
         triggers: [
           { type: "schedule", name: "hourly", cron: "0 * * * *" },
         ],
+        customDomains: ["docs.example.com"], // default branch only
       },
     },
   },
@@ -44,10 +45,61 @@ export default defineConfig({
 
 A policy is split into a **static** existential set and a **dynamic** `branch` closure:
 
-- **Static top-level** — `auth` / `dataApi` (GA service toggles) and the beta `preview` block (`aiGateway`, `functions` keyed by slug, `buckets` keyed by name). Because this is static, the secret set is known at the type level, so `parseEnv` / `fetchEnv` from `@neon/env` return an exact `NeonEnv`.
-- **`branch` closure** — receives a **read-only descriptor** (`BranchTarget`) of the branch being evaluated (`name`, `id`, `exists`, `isDefault`, `isProtected`, `parentId`, `expiresAt`) and returns per-branch *tuning*: `parent`, `ttl`, `protected`, `postgres.computeSettings`, and per-function `runtime`. Function memory is fixed at `2048` MiB for now and is not user-configurable. It runs both against existing branches and during pre-create evaluation (`exists: false`). It **cannot** change which services or functions exist — that is what keeps the static secret set sound.
+- **Static top-level** — `auth` / `dataApi` (GA service toggles) and the beta `preview` block (`aiGateway`, `functions` keyed by slug, `buckets` keyed by name). Because this is static, the secret set is known at the type level, so `parseEnv` / `fetchEnv` from `@neon/env` return an exact `NeonEnv`. Function source, env, and triggers apply on every branch. `customDomains` is default-branch-only ([details](#default-branch-only-fields)).
+- **`branch` closure** — receives a **read-only descriptor** (`BranchTarget`) of the branch being evaluated (`name`, `id`, `exists`, `isDefault`, `isProtected`, `parentId`, `expiresAt`) and returns per-branch *tuning*: `parent`, `ttl`, `protected`, `postgres.computeSettings`, per-function `runtime`, and per-function `customDomains`. Function memory is fixed at `2048` MiB for now and is not user-configurable. It runs both against existing branches and during pre-create evaluation (`exists: false`). It **cannot** change which services or functions exist — that is what keeps the static secret set sound.
 
 Service toggles accept `true` / `{}` / `{ enabled: true }` (enabled) and `false` / `{ enabled: false }` (disabled). Function slugs (record keys) must match `^[a-z0-9]{1,20}$`.
+
+### Default-branch-only fields
+
+A hostname is globally unique, so a child checkout would 409 if it inherited the production list. `plan`, `apply`, and `neon checkout` apply a function's static `customDomains` only when the target is the project's default branch. Today that is the only field with this rule.
+
+```ts
+export default defineConfig({
+  preview: {
+    functions: {
+      hello: {
+        name: "Hello",
+        source: "./functions/hello.ts",
+        customDomains: ["docs.example.com"],
+      },
+    },
+  },
+});
+```
+
+| Declaration | Default branch | Other branches |
+| --- | --- | --- |
+| Static `customDomains` omitted from the `branch` closure | Register the list | Skip the list; still deploy the function |
+| `branch` closure sets `customDomains: ["preview.example.com"]` | Replace the static list | Register that list |
+| `branch` closure sets `customDomains: []` | Register nothing | Register nothing |
+
+`neon checkout preview` deploys `hello` and does not register `docs.example.com`. Give that branch its own hostname:
+
+```ts
+branch: (branch) =>
+  branch.name === "preview"
+    ? {
+        preview: {
+          functions: {
+            hello: { customDomains: ["preview.example.com"] },
+          },
+        },
+      }
+    : {},
+```
+
+Neither skipping the static list nor setting `[]` deletes a remote registration. Delete with `neon function domains delete`.
+
+### Function custom domains (beta)
+
+`customDomains` is a list of hostnames on a function. v1 supports functions only. Hostnames are unique across functions in the resolved policy (after the default-branch rule and any tuning merge). `plan` previews registrations and retargets; `apply` performs them. `apply` registers a hostname that is not on this branch, retargets one that already points at another function on this branch (`--update-existing` / `updateExisting: true`; DELETE then POST), and leaves omitted remotes alone.
+
+Retarget waits for this apply's function deployment, then re-reads ownership before DELETE. If that read shows a different owner than the plan, apply stops without DELETE. DELETE is still unconditional on the hostname, so a move between that read and DELETE can remove someone else's registration. If POST fails after DELETE, the error reports both operations and tells you to inspect with `neon function domains list`.
+
+DNS is yours: `plan` / `apply` print `CNAME <hostname> -> <cname_target>` when the hostname is registered to the declared function and the API returns a target. A blocking conflict does not print CNAME. Point the hostname at that target. An empty target means the region has no custom-domains front door.
+
+A project that can deploy functions can still reject custom-domain list and register with HTTP 404 until custom domains are enabled for that project.
 
 ### Shipping a prebuilt directory (`bundler: "none"`)
 
@@ -177,7 +229,7 @@ The three operations mirror the Terraform mental model: **`inspect`** (read live
 
 ```ts
 import config from "../neon";
-import { inspect, plan, apply } from "@neon/config/v1";
+import { inspect, plan, apply } from "@neon/config-runtime/v1";
 
 const target = { projectId: "patient-art-12345", branchId: "main" };
 
@@ -203,16 +255,11 @@ const live = await inspect(target);
 
 ## Lower-level engine
 
-`inspect` / `plan` / `apply` are thin wrappers over `pullConfig(options)` / `pushConfig(config, options)` (both require `projectId` + `branchId`), which are also exported for advanced/programmatic use along with `defineConfig`, `loadConfigFromFile` (optional `neon.ts` loader), `createRealNeonApi`, the `PlatformError` base class + `ErrorCode` enum, the `errors` and `schemas` namespaces, and the supporting types.
+`inspect` / `plan` / `apply` / `pushConfig` / `pullConfig` live in [`@neon/config-runtime`](../config-runtime). This package keeps `defineConfig`, `loadConfigFromFile`, `createRealNeonApi`, `diffConfig`, the `PlatformError` base class + `ErrorCode` enum, the `errors` and `schemas` namespaces, and the supporting types.
 
 ```ts
 import {
   defineConfig,
-  inspect,
-  plan,
-  apply,
-  pushConfig,
-  pullConfig,
   loadConfigFromFile,
   createRealNeonApi,
   PlatformError,
@@ -228,6 +275,7 @@ import {
 - `auth: {}` and `dataApi: {}` enable those integrations with Neon defaults. Absence of `dataApi` leaves an existing Data API alone. `dataApi: false` / `dataApi.enabled: false` disables it (an override: `updateExisting` or `confirm`). `auth.enabled: false` still leaves Auth alone.
 - Mutable branch drift (`protected`, `ttl`, `postgres.computeSettings`) is reported as a conflict unless `updateExisting` is passed (or a `confirm` callback is supplied to `pushConfig`).
 - Applying to a branch with the `protected` flag set on Neon requires `allowProtectedBranch` (or a `confirm` callback).
+- Omitted `customDomains` leave remote registrations alone. The static list applies only on the default branch (see [Default-branch-only fields](#default-branch-only-fields)). `[]` in branch tuning registers nothing on that branch. Delete with `neon function domains delete`.
 
 ## Env vars
 

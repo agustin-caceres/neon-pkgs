@@ -24,6 +24,7 @@ import type {
 	NeonCredentialMeta,
 	NeonCredentialReveal,
 	NeonCredentialSecret,
+	NeonCustomDomainSnapshot,
 	NeonDataApiSnapshot,
 	NeonDatabaseSnapshot,
 	NeonEndpointSnapshot,
@@ -71,6 +72,10 @@ class FakeNeonApi implements NeonApi {
 	}[] = [];
 	/** Functions materialized by a deploy, keyed by slug (Neon creates on first deploy). */
 	private readonly functions = new Map<string, NeonFunctionSnapshot>();
+	private readonly customDomains = new Map<
+		string,
+		NeonCustomDomainSnapshot
+	>();
 
 	async listProjects(): Promise<NeonProjectSnapshot[]> {
 		throw new Error("not implemented");
@@ -253,7 +258,24 @@ class FakeNeonApi implements NeonApi {
 				invocationUrl: `https://${branchId}.fake.neon.tech/functions/${slug}`,
 			});
 		}
+		const fn = this.functions.get(slug);
+		if (fn) {
+			fn.activeDeploymentId = 1;
+			fn.currentDeployment = { id: 1, status: "completed" };
+		}
 		return { id: 1, status: "completed" };
+	}
+
+	async getBranchFunction(
+		_projectId: string,
+		_branchId: string,
+		slug: string,
+	): Promise<NeonFunctionSnapshot> {
+		const fn = this.functions.get(slug);
+		if (!fn) {
+			throw new Error(`Function ${slug} was not found.`);
+		}
+		return fn;
 	}
 
 	async listBranchTriggers(): Promise<NeonTriggerSnapshot[]> {
@@ -270,6 +292,40 @@ class FakeNeonApi implements NeonApi {
 
 	async deleteBranchTrigger(): Promise<void> {
 		throw new Error("not implemented");
+	}
+
+	async listBranchCustomDomains(
+		_projectId: string,
+		_branchId: string,
+	): Promise<NeonCustomDomainSnapshot[]> {
+		return [...this.customDomains.values()];
+	}
+
+	async registerBranchCustomDomain(
+		_projectId: string,
+		_branchId: string,
+		input: { domain: string; functionSlug: string },
+	): Promise<NeonCustomDomainSnapshot> {
+		const snapshot: NeonCustomDomainSnapshot = {
+			domain: input.domain,
+			entityType: "function",
+			entityId: input.functionSlug,
+			cnameTarget: "custom-domains.fake.neon.tech",
+		};
+		this.customDomains.set(input.domain, snapshot);
+		return snapshot;
+	}
+
+	async deleteBranchCustomDomain(
+		_projectId: string,
+		_branchId: string,
+		domain: string,
+	): Promise<void> {
+		this.customDomains.delete(domain);
+	}
+
+	seedCustomDomain(snapshot: NeonCustomDomainSnapshot): void {
+		this.customDomains.set(snapshot.domain, snapshot);
 	}
 
 	async getAiGatewayEnabled(): Promise<boolean> {
@@ -840,6 +896,197 @@ describe("config commands", () => {
 		await applyCmd({ ...baseProps(api, stream), output: "table", config });
 
 		expect(read()).toContain("Utilized services: Postgres");
+	});
+
+	it("plans a custom-domain register without inventing a CNAME target", async () => {
+		const api = new FakeNeonApi();
+		const { stream, read } = captureOut();
+		const config = writeConfig(
+			'export default { preview: { functions: { hello: { name: "Hello", source: "./hello.ts", customDomains: ["docs.example.com"] } } } };\n',
+		);
+
+		await planCmd({ ...baseProps(api, stream), output: "table", config });
+
+		const out = read();
+		expect(out).toContain("domain docs.example.com -> hello");
+		expect(out).not.toContain("CNAME docs.example.com");
+	});
+
+	it("plans no static custom domain on a non-default branch", async () => {
+		const devId = "br-sunny-glade-12345";
+		const api = new FakeNeonApi();
+		api.listBranches = async () => [
+			{
+				id: BRANCH_ID,
+				name: BRANCH_NAME,
+				isDefault: true,
+				protected: false,
+			},
+			{
+				id: devId,
+				name: "dev",
+				isDefault: false,
+				protected: false,
+			},
+		];
+		api.listEndpoints = async () => [
+			{
+				id: "ep-fake-1",
+				branchId: BRANCH_ID,
+				type: "read_write",
+				autoscalingLimitMinCu: 0.25,
+				autoscalingLimitMaxCu: 0.25,
+				suspendTimeout: "5m",
+			},
+			{
+				id: "ep-fake-2",
+				branchId: devId,
+				type: "read_write",
+				autoscalingLimitMinCu: 0.25,
+				autoscalingLimitMaxCu: 0.25,
+				suspendTimeout: "5m",
+			},
+		];
+		const { stream, read } = captureOut();
+		const config = writeConfig(
+			'export default { preview: { functions: { hello: { name: "Hello", source: "./hello.ts", customDomains: ["docs.example.com"] } } } };\n',
+		);
+
+		await planCmd({
+			...baseProps(api, stream),
+			branch: devId,
+			output: "table",
+			config,
+		});
+
+		const out = stripAnsi(read());
+		expect(out).toContain("function hello");
+		expect(out).not.toContain("domain docs.example.com");
+	});
+
+	it("prints CNAME for an already-registered declared domain on plan", async () => {
+		const api = new FakeNeonApi();
+		api.seedCustomDomain({
+			domain: "docs.example.com",
+			entityType: "function",
+			entityId: "hello",
+			cnameTarget: "edge.neon.tech",
+		});
+		const { stream, read } = captureOut();
+		const config = writeConfig(
+			'export default { preview: { functions: { hello: { name: "Hello", source: "./hello.ts", customDomains: ["docs.example.com"] } } } };\n',
+		);
+
+		await planCmd({ ...baseProps(api, stream), output: "table", config });
+
+		expect(read()).toContain("CNAME docs.example.com -> edge.neon.tech");
+	});
+
+	it("exits 1 when plan hits a blocking custom-domain conflict", async () => {
+		const origExitCode = process.exitCode;
+		process.exitCode = 0;
+		try {
+			const api = new FakeNeonApi();
+			api.seedCustomDomain({
+				domain: "docs.example.com",
+				entityType: "bucket",
+				entityId: "uploads",
+				cnameTarget: "edge.neon.tech",
+			});
+			const { stream, read } = captureOut();
+			const config = writeConfig(
+				'export default { preview: { functions: { hello: { name: "Hello", source: "./hello.ts", customDomains: ["docs.example.com"] } } } };\n',
+			);
+
+			await planCmd({
+				...baseProps(api, stream),
+				output: "table",
+				config,
+			});
+
+			const out = read();
+			expect(out).toContain("customDomain");
+			expect(out).not.toContain("re-run with --update-existing to apply");
+			expect(out).not.toContain("CNAME");
+			expect(process.exitCode).toBe(1);
+
+			process.exitCode = 0;
+			const jsonOut = captureOut();
+			await planCmd({
+				...baseProps(api, jsonOut.stream),
+				output: "json",
+				config,
+			});
+			const result = JSON.parse(jsonOut.read());
+			expect(result.conflicts[0].field).toBe("customDomain");
+			expect(result.customDomains).toEqual([
+				{ domain: "docs.example.com", slug: "hello" },
+			]);
+			expect(process.exitCode).toBe(1);
+		} finally {
+			process.exitCode = origExitCode;
+		}
+	});
+
+	it("exits 1 for a blocking domain even when the hostname contains updateexisting", async () => {
+		const origExitCode = process.exitCode;
+		process.exitCode = 0;
+		try {
+			const api = new FakeNeonApi();
+			api.seedCustomDomain({
+				domain: "updateexisting.example.com",
+				entityType: "bucket",
+				entityId: "uploads",
+				cnameTarget: "edge.neon.tech",
+			});
+			const { stream, read } = captureOut();
+			const config = writeConfig(
+				'export default { preview: { functions: { hello: { name: "Hello", source: "./hello.ts", customDomains: ["updateexisting.example.com"] } } } };\n',
+			);
+
+			await planCmd({
+				...baseProps(api, stream),
+				output: "table",
+				config,
+			});
+
+			const out = read();
+			expect(out).toContain("customDomain");
+			expect(out).not.toContain("re-run with --update-existing to apply");
+			expect(process.exitCode).toBe(1);
+		} finally {
+			process.exitCode = origExitCode;
+		}
+	});
+
+	it("plan exits 0 for a non-domain conflict (no read-write endpoint)", async () => {
+		const origExitCode = process.exitCode;
+		try {
+			const api = new FakeNeonApi();
+			api.listEndpoints = async () => [];
+			const config = writeConfig(
+				"export default { branch: () => ({ postgres: { computeSettings: { autoscalingLimitMaxCu: 2 } } }) };\n",
+			);
+			for (const output of ["table", "json", "yaml"] as const) {
+				process.exitCode = 0;
+				const { stream, read } = captureOut();
+				await planCmd({
+					...baseProps(api, stream),
+					output,
+					config,
+				});
+				const out = read();
+				if (output === "json") {
+					const result = JSON.parse(out);
+					expect(result.conflicts[0].field).toBe("endpoint");
+				} else {
+					expect(out).toMatch(/endpoint/);
+				}
+				expect(process.exitCode ?? 0).toBe(0);
+			}
+		} finally {
+			process.exitCode = origExitCode;
+		}
 	});
 
 	it("pulls the branch env into a local .env after a successful apply (like link/checkout)", async () => {
@@ -1437,5 +1684,86 @@ describe("createBranchFromPolicyOnCheckout", () => {
 		expect(api.deployBranchFunctionCalls[0].input.environment).toEqual({
 			resendApiKey: "re_from_file",
 		});
+	});
+
+	it("deploys the function on checkout without registering static customDomains", async () => {
+		const api = new CreateBranchNeonApi();
+		const source = join(cwd, "hello.ts");
+		writeFileSync(
+			source,
+			"export default { fetch() { return new Response('ok'); } };\n",
+		);
+		writeFileSync(
+			join(cwd, "neon.ts"),
+			`export default { preview: { functions: { hello: { name: 'Hello', source: ${JSON.stringify(
+				source,
+			)}, customDomains: ["docs.example.com"] } } } };\n`,
+		);
+
+		const created = await createBranchFromPolicyOnCheckout({
+			projectId: PROJECT_ID,
+			branchName: NEW_BRANCH_NAME,
+			runtimeApi: api,
+			cwd,
+		});
+
+		expect(created).toEqual({ branchId: NEW_BRANCH_ID });
+		expect(api.deployBranchFunctionCalls).toHaveLength(1);
+		expect(
+			await api.listBranchCustomDomains(PROJECT_ID, NEW_BRANCH_ID),
+		).toEqual([]);
+	});
+
+	it("registers a tuning custom domain on checkout of a non-default branch", async () => {
+		const api = new CreateBranchNeonApi();
+		const source = join(cwd, "hello.ts");
+		writeFileSync(
+			source,
+			"export default { fetch() { return new Response('ok'); } };\n",
+		);
+		writeFileSync(
+			join(cwd, "neon.ts"),
+			`export default {
+  preview: {
+    functions: {
+      hello: {
+        name: "Hello",
+        source: ${JSON.stringify(source)},
+        customDomains: ["docs.example.com"],
+      },
+    },
+  },
+  branch: (branch) => ({
+    preview: {
+      functions: {
+        hello: branch.isDefault
+          ? {}
+          : { customDomains: ["preview.example.com"] },
+      },
+    },
+  }),
+};
+`,
+		);
+
+		const created = await createBranchFromPolicyOnCheckout({
+			projectId: PROJECT_ID,
+			branchName: NEW_BRANCH_NAME,
+			runtimeApi: api,
+			cwd,
+		});
+
+		expect(created).toEqual({ branchId: NEW_BRANCH_ID });
+		expect(api.deployBranchFunctionCalls).toHaveLength(1);
+		expect(
+			await api.listBranchCustomDomains(PROJECT_ID, NEW_BRANCH_ID),
+		).toEqual([
+			{
+				domain: "preview.example.com",
+				entityType: "function",
+				entityId: "hello",
+				cnameTarget: "custom-domains.fake.neon.tech",
+			},
+		]);
 	});
 });

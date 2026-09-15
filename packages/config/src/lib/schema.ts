@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+	customDomainValidationError,
+	normalizeCustomDomain,
+} from "./custom-domain.js";
 import { parseBranchTtl, parseSuspendTimeout } from "./duration.js";
 import { externalPackageRoot } from "./external-packages.js";
 import { isWildcardPattern, validatePattern } from "./patterns.js";
@@ -233,6 +237,31 @@ const functionScheduleTriggerSchema = z.strictObject({
 	enabled: z.boolean().optional(),
 });
 
+const customDomainSchema = z.string().superRefine((value, ctx) => {
+	const message = customDomainValidationError(value);
+	if (message) {
+		ctx.addIssue({ code: "custom", message });
+	}
+});
+
+const customDomainsSchema = z
+	.array(customDomainSchema)
+	.superRefine((domains, ctx) => {
+		const seen = new Set<string>();
+		for (const [index, domain] of domains.entries()) {
+			const normalized = normalizeCustomDomain(domain);
+			if (seen.has(normalized)) {
+				ctx.addIssue({
+					code: "custom",
+					path: [index],
+					message: `custom domain "${normalized}" is listed more than once`,
+				});
+				continue;
+			}
+			seen.add(normalized);
+		}
+	});
+
 /**
  * The name of a package the bundler must leave alone. Accepts what esbuild's `external`
  * accepts for a package — a bare name, a scope, or a subpath — and rejects a relative or
@@ -340,6 +369,7 @@ export const functionDefSchema = z
 		bundler: bundlerSchema.optional(),
 		dev: functionDevConfigSchema.optional(),
 		triggers: z.array(functionScheduleTriggerSchema).optional(),
+		customDomains: customDomainsSchema.optional(),
 	})
 	.check((ctx) => {
 		const entries = ctx.value.externalPackages ?? [];
@@ -461,6 +491,7 @@ export const previewInputSchema = z
 /** Per-function deploy tuning returned by the `branch` closure. */
 export const functionTuningSchema = z.strictObject({
 	runtime: runtimeSchema.optional(),
+	customDomains: customDomainsSchema.optional(),
 });
 
 /** Per-branch Preview tuning. Keys must be slugs declared in the static `preview`. */

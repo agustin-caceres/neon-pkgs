@@ -2,7 +2,9 @@ import { describe, expect, test } from "vitest";
 import { ErrorCode, PlatformError } from "./errors.js";
 import {
 	buildFunctionDeployForm,
+	collectCursorPages,
 	createNeonAuthRestInput,
+	customDomainsUnavailableError,
 	isPreviewFeatureUnavailable,
 	previewUnavailableError,
 	readJsonBody,
@@ -313,5 +315,100 @@ describe("previewUnavailableError", () => {
 			details: { status: 401 },
 		});
 		expect(previewUnavailableError(original, "Functions")).toBe(original);
+	});
+});
+
+describe("customDomainsUnavailableError", () => {
+	test("404 does not prescribe a Functions beta region", () => {
+		const original = new PlatformError(ErrorCode.NotFound, "boom", {
+			details: {
+				status: 404,
+				neonMessage: "custom domains not available for this project",
+				requestId: "req-cdom",
+			},
+		});
+		const wrapped = customDomainsUnavailableError(original);
+		expect(wrapped).toBeInstanceOf(PlatformError);
+		if (!(wrapped instanceof PlatformError)) throw new Error("not wrapped");
+		expect(wrapped.code).toBe(ErrorCode.FeatureUnavailable);
+		expect(wrapped.message).toMatch(
+			/Custom domains aren't available for this Neon project/,
+		);
+		expect(wrapped.message).toMatch(/HTTP 404 Not Found/);
+		expect(wrapped.message).toMatch(
+			/custom domains not available for this project/,
+		);
+		expect(wrapped.message).toMatch(/request id req-cdom/);
+		expect(wrapped.message).toMatch(/enabled per project/);
+		expect(wrapped.message).toMatch(/Remove `customDomains`/);
+		expect(wrapped.message).not.toMatch(/aws-us-east-2/);
+		expect(wrapped.message).not.toMatch(/aws-eu-central-1/);
+		expect(wrapped.message).not.toMatch(/neon link/);
+		expect(wrapped.message).not.toMatch(/one of those regions/);
+	});
+
+	test("503 with project-unavailable body still does not prescribe a region", () => {
+		const original = new PlatformError(ErrorCode.ServerError, "boom", {
+			details: {
+				status: 503,
+				neonMessage: "custom domains not available for this project",
+			},
+		});
+		const wrapped = customDomainsUnavailableError(original);
+		if (!(wrapped instanceof PlatformError)) throw new Error("not wrapped");
+		expect(wrapped.message).toMatch(/Remove `customDomains`/);
+		expect(wrapped.message).not.toMatch(/aws-us-east-2/);
+		expect(wrapped.message).not.toMatch(/neon link/);
+	});
+
+	test("503 without unavailability signal: incident guidance", () => {
+		const original = new PlatformError(ErrorCode.ServerError, "boom", {
+			details: {
+				status: 503,
+				neonMessage: "service not available",
+			},
+		});
+		const wrapped = customDomainsUnavailableError(original);
+		if (!(wrapped instanceof PlatformError)) throw new Error("not wrapped");
+		expect(wrapped.message).toMatch(/incident/);
+		expect(wrapped.message).toMatch(/neonstatus\.com/);
+		expect(wrapped.message).not.toMatch(/aws-us-east-2/);
+		expect(wrapped.message).not.toMatch(/Remove `customDomains`/);
+	});
+
+	test("passes a non-unavailable error through unchanged", () => {
+		const original = new PlatformError(ErrorCode.Unauthorized, "nope", {
+			details: { status: 401 },
+		});
+		expect(customDomainsUnavailableError(original)).toBe(original);
+	});
+});
+
+describe("collectCursorPages", () => {
+	test("walks every page and stops when next repeats", async () => {
+		const pages = [
+			{ items: ["a"], next: "p2" },
+			{ items: ["b"], next: "p2" },
+		];
+		let calls = 0;
+		const items = await collectCursorPages(async () => {
+			const page = pages[calls];
+			if (page === undefined) throw new Error("over-fetched");
+			calls += 1;
+			return page;
+		});
+		expect(items).toEqual(["a", "b"]);
+		expect(calls).toBe(2);
+	});
+
+	test("passes the previous next cursor into the following fetch", async () => {
+		const seen: Array<string | undefined> = [];
+		const items = await collectCursorPages(async (cursor) => {
+			seen.push(cursor);
+			if (cursor === undefined) return { items: [1], next: "two" };
+			return { items: [2] };
+		});
+		expect(seen).toEqual([undefined, "two"]);
+		expect(items).toEqual([1, 2]);
 	});
 });

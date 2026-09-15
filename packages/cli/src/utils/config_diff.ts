@@ -127,7 +127,10 @@ const renderBranchGroups = (
 };
 
 /** Friendly label for a service change identifier (`bucket:x` → `bucket x`). */
-const serviceLabel = (identifier: string): string => {
+const serviceLabel = (
+	identifier: string,
+	details?: AppliedChange["details"],
+): string => {
 	if (identifier === "auth") return "Neon Auth";
 	if (identifier === "dataApi") return "Data API";
 	if (identifier.startsWith("bucket:")) {
@@ -135,6 +138,22 @@ const serviceLabel = (identifier: string): string => {
 	}
 	if (identifier.startsWith("function:")) {
 		return `function ${identifier.slice("function:".length)}`;
+	}
+	if (identifier.startsWith("domain:")) {
+		const domain = identifier.slice("domain:".length);
+		const previous =
+			typeof details?.previousSlug === "string"
+				? details.previousSlug
+				: undefined;
+		const slug =
+			typeof details?.slug === "string" ? details.slug : undefined;
+		if (previous !== undefined && slug !== undefined) {
+			return `domain ${domain}: ${previous} → ${slug}`;
+		}
+		if (slug !== undefined) {
+			return `domain ${domain} -> ${slug}`;
+		}
+		return `domain ${domain}`;
 	}
 	return identifier;
 };
@@ -180,7 +199,7 @@ export const renderAppliedChanges = (
 		.filter((c) => c.kind === "service")
 		.sort((a, b) => a.identifier.localeCompare(b.identifier));
 	for (const service of services) {
-		const label = serviceLabel(service.identifier);
+		const label = serviceLabel(service.identifier, service.details);
 		const line =
 			service.action === "create"
 				? `+ ${label}`
@@ -211,13 +230,21 @@ export const renderAppliedChanges = (
 	return lines.join("\n");
 };
 
-/**
- * Render branch-setting **conflicts** (drift the policy wants to change but that
- * needs `--update-existing`) as a `git diff`-style before→after report: grouped
- * per branch, sorted by field, `current → desired` with the old value in red and
- * the new in green. Conflicts already carry both sides, so this is the fullest
- * form of the diff. Returns "" when there are no conflicts.
- */
+// Hostnames are user-controlled; matching /updateExisting/i classified
+// updateexisting.example.com as overrideable.
+const isOverrideableConflict = (conflict: ConflictReport): boolean =>
+	conflict.reason.includes("Pass `updateExisting: true`");
+
+const CUSTOM_DOMAIN_REASON = /^custom domain "([^"]+)"/;
+
+const labeledConflictField = (conflict: ConflictReport): string => {
+	if (conflict.field !== "customDomain") return conflict.field;
+	const match = CUSTOM_DOMAIN_REASON.exec(conflict.reason);
+	return match?.[1] !== undefined
+		? `customDomain ${match[1]}`
+		: conflict.field;
+};
+
 export const renderBranchSettingConflicts = (
 	conflicts: ConflictReport[],
 	opts: { color: boolean },
@@ -230,15 +257,55 @@ export const renderBranchSettingConflicts = (
 		const existing = byBranch.get(conflict.identifier) ?? [];
 		byBranch.set(conflict.identifier, [
 			...existing,
-			...expandField(conflict.field, conflict.current, conflict.desired),
+			...expandField(
+				labeledConflictField(conflict),
+				conflict.current,
+				conflict.desired,
+			),
 		]);
 	}
 
+	const heading = conflicts.every(isOverrideableConflict)
+		? "Branch settings differ (re-run with --update-existing to apply)"
+		: "Branch settings differ";
 	const lines: string[] = [
-		paint.title(
-			"Branch settings differ (re-run with --update-existing to apply)",
-		),
+		paint.title(heading),
 		...renderBranchGroups(byBranch, paint),
 	];
+	return lines.join("\n");
+};
+
+export const renderCustomDomainFollowup = (
+	result: {
+		customDomains?: Array<{
+			domain: string;
+			slug: string;
+			cnameTarget?: string;
+		}>;
+		warnings: string[];
+	},
+	opts: { color: boolean },
+): string => {
+	const paint = palette(opts.color);
+	const lines: string[] = [];
+	const cnames = (result.customDomains ?? []).filter(
+		(d) => d.cnameTarget !== undefined && d.cnameTarget !== "",
+	);
+	if (cnames.length > 0) {
+		lines.push(paint.title("Custom domains"));
+		for (const d of cnames) {
+			lines.push(`  CNAME ${d.domain} -> ${d.cnameTarget}`);
+		}
+		lines.push(
+			"  Point each hostname at the CNAME target. Neon does not create DNS records.",
+		);
+	}
+	if (result.warnings.length > 0) {
+		if (lines.length > 0) lines.push("");
+		lines.push(paint.title("Warnings"));
+		for (const warning of result.warnings) {
+			lines.push(`  ${warning}`);
+		}
+	}
 	return lines.join("\n");
 };

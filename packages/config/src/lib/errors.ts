@@ -158,9 +158,14 @@ export class PushConflictError extends PlatformError {
 				`      fix     : ${suggestFix(c)}`,
 			);
 		}
-		const hasMutable = conflicts.some((c) => !isImmutableConflict(c));
+		const hasOverrideable = conflicts.some(
+			(c) =>
+				!isImmutableConflict(c) &&
+				(c.field !== "customDomain" ||
+					reasonAllowsUpdateExisting(c.reason)),
+		);
 		lines.push("");
-		if (hasMutable) {
+		if (hasOverrideable) {
 			lines.push(
 				"For mutable conflicts, pass `updateExisting: true` (SDK) / `--update-existing` (CLI) to apply.",
 			);
@@ -177,7 +182,16 @@ function isImmutableConflict(_c: ConflictReport): boolean {
 	return false;
 }
 
+// Hostnames are user-controlled; matching /updateExisting/i classified
+// updateexisting.example.com as overrideable.
+function reasonAllowsUpdateExisting(reason: string): boolean {
+	return reason.includes("Pass `updateExisting: true`");
+}
+
 function suggestFix(c: ConflictReport): string {
+	if (c.field === "customDomain" && !reasonAllowsUpdateExisting(c.reason)) {
+		return "delete the domain with `neon function domains delete`, or stop declaring it in neon.ts.";
+	}
 	if (isImmutableConflict(c)) {
 		return "immutable on Neon — recreate the project, or change your `neon.ts` to match the remote.";
 	}
