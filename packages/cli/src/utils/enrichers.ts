@@ -82,6 +82,10 @@ export type ResolvedBranchRef = {
 	branchName: string;
 	/** True when no branch was specified and the project's default was used. */
 	usedDefault: boolean;
+	isDefault?: boolean;
+	isProtected?: boolean;
+	parentId?: string;
+	expiresAt?: string;
 };
 
 /**
@@ -107,6 +111,18 @@ export const resolveBranchRef = async (
 	});
 	const branches = data.branches;
 
+	const listingFields = (
+		listed: Branch,
+	): Pick<
+		ResolvedBranchRef,
+		"isDefault" | "isProtected" | "parentId" | "expiresAt"
+	> => ({
+		isDefault: listed.default === true,
+		isProtected: listed.protected === true,
+		...(listed.parent_id ? { parentId: listed.parent_id } : {}),
+		...(listed.expires_at ? { expiresAt: listed.expires_at } : {}),
+	});
+
 	if (branch) {
 		const ref = branch.toString();
 		const found = looksLikeBranchId(ref)
@@ -117,6 +133,7 @@ export const resolveBranchRef = async (
 				branchId: found.id,
 				branchName: found.name ?? found.id,
 				usedDefault: false,
+				...listingFields(found),
 			};
 		}
 		// A `br-…` id absent from the listing is still usable as an id (trust it like
@@ -139,6 +156,7 @@ export const resolveBranchRef = async (
 		branchId: defaultBranch.id,
 		branchName: defaultBranch.name ?? defaultBranch.id,
 		usedDefault: true,
+		...listingFields(defaultBranch),
 	};
 };
 

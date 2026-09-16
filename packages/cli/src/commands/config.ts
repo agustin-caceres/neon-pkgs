@@ -1,6 +1,11 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { packagesToStage, resolveConfig } from "@neon/config";
+import {
+	type BranchTarget,
+	packagesToStage,
+	previewGaWarningForConfig,
+	resolveConfig,
+} from "@neon/config";
 import {
 	apply,
 	assertZipWithinLimits,
@@ -333,7 +338,7 @@ const resolveServices = async (
 };
 
 /**
- * Write the hello-world handler the scaffolded `preview.functions` entry points at. An
+ * Write the hello-world handler the scaffolded `functions` entry points at. An
  * existing `hello.ts` is left alone: the declared function keeps pointing at it, which is the
  * better outcome than overwriting a file the user wrote.
  */
@@ -722,10 +727,113 @@ export const planCmd = async (props: ConfigProps): Promise<void> => {
 	}
 };
 
+const warnDeprecatedPreview = (config: Config, target?: BranchTarget): void => {
+	const message = previewGaWarningForConfig(config, target);
+	if (message) log.warning("%s", message);
+};
+
+const warningTargetFromResolved = (branch: {
+	branchName: string;
+	branchId: string;
+	isDefault?: boolean;
+	isProtected?: boolean;
+	parentId?: string;
+	expiresAt?: string;
+}): BranchTarget => ({
+	name: branch.branchName,
+	id: branch.branchId,
+	exists: true,
+	...(branch.isDefault !== undefined ? { isDefault: branch.isDefault } : {}),
+	...(branch.isProtected !== undefined
+		? { isProtected: branch.isProtected }
+		: {}),
+	...(branch.parentId ? { parentId: branch.parentId } : {}),
+	...(branch.expiresAt ? { expiresAt: branch.expiresAt } : {}),
+});
+
+const warningTargetForExistingBranch = async (props: {
+	projectId: string;
+	branchId: string;
+	branchName?: string;
+	apiKey?: string;
+	apiHost?: string;
+	runtimeApi?: NeonApi;
+}): Promise<BranchTarget> => {
+	if (props.runtimeApi) {
+		const branches = await props.runtimeApi.listBranches(props.projectId);
+		const branch = branches.find((listed) => listed.id === props.branchId);
+		if (branch) {
+			return {
+				name: branch.name,
+				id: branch.id,
+				exists: true,
+				isDefault: branch.isDefault,
+				isProtected: branch.protected,
+				...(branch.parentId ? { parentId: branch.parentId } : {}),
+				...(branch.expiresAt ? { expiresAt: branch.expiresAt } : {}),
+			};
+		}
+	}
+	if (props.apiKey) {
+		const apiClient = getApiClient({
+			apiKey: props.apiKey,
+			...(props.apiHost ? { apiHost: props.apiHost } : {}),
+		});
+		const { data } = await apiClient.listProjectBranches({
+			projectId: props.projectId,
+		});
+		const found = data.branches.find(
+			(listed) => listed.id === props.branchId,
+		);
+		if (found) {
+			return {
+				name: found.name ?? props.branchName ?? props.branchId,
+				id: found.id,
+				exists: true,
+				isDefault: found.default === true,
+				isProtected: found.protected === true,
+				...(found.parent_id ? { parentId: found.parent_id } : {}),
+				...(found.expires_at ? { expiresAt: found.expires_at } : {}),
+			};
+		}
+	}
+	return {
+		name: props.branchName ?? props.branchId,
+		id: props.branchId,
+		exists: true,
+		isDefault: false,
+	};
+};
+
+const warnDeprecatedPreviewOnCreate = async (
+	config: Config,
+	props: {
+		projectId: string;
+		branchId: string;
+		branchName: string;
+		apiKey?: string;
+		apiHost?: string;
+		runtimeApi?: NeonApi;
+	},
+): Promise<void> => {
+	try {
+		const listed = await warningTargetForExistingBranch(props);
+		warnDeprecatedPreview(config, { ...listed, exists: false });
+	} catch {
+		warnDeprecatedPreview(config, {
+			name: props.branchName,
+			id: props.branchId,
+			exists: false,
+			isDefault: false,
+		});
+	}
+};
+
 export const applyCmd = async (props: ConfigProps): Promise<void> => {
 	const config = await loadConfig(props);
 	const branch = await resolveBranchRef(props);
 	announceTargetBranch(props, branch, "Applying to branch");
+	warnDeprecatedPreview(config, warningTargetFromResolved(branch));
 	const branchId = branch.branchId;
 
 	// The AI Gateway can't serve on the Free plan, so refuse to provision it up front rather
@@ -783,7 +891,7 @@ type ReportMode = "plan" | "apply";
  * the plan/apply table. Postgres is always present (every branch has it); the rest are listed
  * only when the policy declares them. This deliberately surfaces services that produce **no**
  * plan step — notably the AI Gateway, which is always available and only needs a scoped branch
- * credential (not a provisioning step) — so adding `preview.aiGateway` to a neon.ts isn't
+ * credential (not a provisioning step) — so adding `aiGateway` to a neon.ts isn't
  * mistaken for being silently dropped. Service enablement is static top-level config (it never
  * lives in the per-branch closure), so reading it straight off `config` is accurate.
  */
@@ -955,6 +1063,7 @@ const assertAiGatewayProvisionableFromCreds = async (props: {
 export const applyPolicyOnCreate = async (props: {
 	projectId: string;
 	branchId: string;
+	branchName?: string;
 	apiKey?: string;
 	apiHost?: string;
 	runtimeApi?: NeonApi;
@@ -974,6 +1083,22 @@ export const applyPolicyOnCreate = async (props: {
 		const message = err instanceof Error ? err.message : String(err);
 		if (/Could not find a Neon config file/i.test(message)) return;
 		throw err;
+	}
+
+	try {
+		warnDeprecatedPreview(
+			config,
+			await warningTargetForExistingBranch({
+				projectId: props.projectId,
+				branchId: props.branchId,
+				...(props.branchName ? { branchName: props.branchName } : {}),
+				...(props.apiKey ? { apiKey: props.apiKey } : {}),
+				...(props.apiHost ? { apiHost: props.apiHost } : {}),
+				...(props.runtimeApi ? { runtimeApi: props.runtimeApi } : {}),
+			}),
+		);
+	} catch {
+		warnDeprecatedPreview(config);
 	}
 
 	await assertAiGatewayProvisionableFromCreds({
@@ -1107,6 +1232,14 @@ export const createBranchFromPolicyOnCheckout = async (props: {
 			branchId,
 		);
 		logPolicyResult(result, { color: props.color !== false });
+		await warnDeprecatedPreviewOnCreate(config, {
+			projectId: props.projectId,
+			branchId,
+			branchName,
+			...(props.apiKey ? { apiKey: props.apiKey } : {}),
+			...(props.apiHost ? { apiHost: props.apiHost } : {}),
+			...(props.runtimeApi ? { runtimeApi: props.runtimeApi } : {}),
+		});
 		return { branchId };
 	} catch (err) {
 		// The branch exists but its policy didn't fully apply. Hand the id back so checkout
@@ -1118,6 +1251,14 @@ export const createBranchFromPolicyOnCheckout = async (props: {
 				err.branchName,
 				err.branchId,
 			);
+			await warnDeprecatedPreviewOnCreate(config, {
+				projectId: props.projectId,
+				branchId: err.branchId,
+				branchName: err.branchName,
+				...(props.apiKey ? { apiKey: props.apiKey } : {}),
+				...(props.apiHost ? { apiHost: props.apiHost } : {}),
+				...(props.runtimeApi ? { runtimeApi: props.runtimeApi } : {}),
+			});
 			return { branchId: err.branchId, policyFailure: err.reason };
 		}
 		throw err;

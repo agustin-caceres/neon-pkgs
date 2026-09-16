@@ -53,6 +53,8 @@ import {
 const PROJECT_ID = "patient-art-12345";
 const BRANCH_ID = "br-snowy-frost-12345";
 const BRANCH_NAME = "main";
+const CHILD_ID = "br-staging-frost-99999";
+const CHILD_NAME = "staging";
 
 /**
  * Full {@link NeonApi} implementation backed by fixed in-memory state for one
@@ -377,6 +379,43 @@ class FakeNeonApi implements NeonApi {
 	}
 }
 
+class ChildBranchNeonApi extends FakeNeonApi {
+	override async listBranches(
+		projectId: string,
+	): Promise<NeonBranchSnapshot[]> {
+		void projectId;
+		return [
+			{
+				id: BRANCH_ID,
+				name: BRANCH_NAME,
+				isDefault: true,
+				protected: false,
+			},
+			{
+				id: CHILD_ID,
+				name: CHILD_NAME,
+				isDefault: false,
+				protected: false,
+				parentId: BRANCH_ID,
+			},
+		];
+	}
+
+	override async listEndpoints(
+		projectId: string,
+	): Promise<NeonEndpointSnapshot[]> {
+		const [main] = await super.listEndpoints(projectId);
+		return [
+			main,
+			{
+				...main,
+				id: "ep-fake-child",
+				branchId: CHILD_ID,
+			},
+		];
+	}
+}
+
 /**
  * Minimal stand-in for the neonctl `Api` client. Only `listProjectBranches` is
  * exercised (by `branchIdFromProps`, to resolve the branch name to its id);
@@ -675,6 +714,62 @@ describe("config commands", () => {
 		expect(bundle.byteLength).toBeGreaterThan(0);
 		expect(bundle[0]).toBe(0x50); // 'P'
 		expect(bundle[1]).toBe(0x4b); // 'K'
+	});
+
+	it("apply warns for preview tuning gated on parentId", async () => {
+		const api = new ChildBranchNeonApi();
+		const { stream } = captureOut();
+		const source = join(cwd, "hello.ts");
+		writeFileSync(
+			source,
+			"export default { fetch() { return new Response('ok'); } };\n",
+		);
+		const config = writeConfig(
+			`export default { functions: { hello: { name: 'Hello', source: ${JSON.stringify(
+				source,
+			)} } }, branch: (branch) => branch.parentId ? { preview: { functions: { hello: { runtime: 'nodejs24' } } } } : {} };\n`,
+		);
+		const childApiClient = {
+			listProjectBranches: async () => ({
+				data: {
+					branches: [
+						{
+							id: BRANCH_ID,
+							name: BRANCH_NAME,
+							default: true,
+							protected: false,
+						},
+						{
+							id: CHILD_ID,
+							name: CHILD_NAME,
+							default: false,
+							protected: false,
+							parent_id: BRANCH_ID,
+						},
+					],
+				},
+			}),
+		};
+		const stderrChunks: string[] = [];
+		const origErr = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			stderrChunks.push(chunk.toString());
+			return origErr(chunk);
+		}) as typeof process.stderr.write;
+
+		try {
+			await applyCmd({
+				...baseProps(api, stream),
+				apiClient: childApiClient as never,
+				branch: CHILD_NAME,
+				config,
+			});
+			expect(stderrChunks.join("")).toContain(
+				"branch.preview.functions → branch.functions",
+			);
+		} finally {
+			process.stderr.write = origErr;
+		}
 	});
 
 	it("apply ships a bundler none directory without esbuild flattening", async () => {
@@ -1243,7 +1338,7 @@ describe("config init --from-branch", () => {
 		// mentioned in the header comment as something to add by hand.
 		expect(source).not.toMatch(/^\s+aiGateway: true,/m);
 		expect(source).toContain(
-			"// `preview: { aiGateway: true }` if the policy should declare it.",
+			"// `aiGateway: true` if the policy should declare it.",
 		);
 	});
 
@@ -1316,6 +1411,21 @@ describe("config init --from-branch", () => {
 		expect(existsSync(join(cwd, "neon.ts"))).toBe(false);
 	});
 });
+
+/** First `listBranches` is the CLI GA warning; apply lists again afterwards. */
+class ApplyWarningListFailsNeonApi extends FakeNeonApi {
+	private listCalls = 0;
+
+	override async listBranches(
+		projectId: string,
+	): Promise<NeonBranchSnapshot[]> {
+		this.listCalls += 1;
+		if (this.listCalls === 1) {
+			throw new Error("warning list failed");
+		}
+		return super.listBranches(projectId);
+	}
+}
 
 describe("applyPolicyOnCreate", () => {
 	let cwd: string;
@@ -1404,6 +1514,20 @@ describe("applyPolicyOnCreate", () => {
 		expect(api.deployBranchFunctionCalls[0].input.environment).toEqual({
 			resendApiKey: "re_from_file",
 		});
+	});
+
+	it("still applies when the GA warning list fails", async () => {
+		const api = new ApplyWarningListFailsNeonApi();
+		writeFileSync(join(cwd, "neon.ts"), "export default { auth: {} };\n");
+
+		await applyPolicyOnCreate({
+			projectId: PROJECT_ID,
+			branchId: BRANCH_ID,
+			runtimeApi: api,
+			cwd,
+		});
+
+		expect(api.enableNeonAuthCalls).toHaveLength(1);
 	});
 });
 
@@ -1524,6 +1648,35 @@ class CreateBranchThenRejectNeonApi extends CreateBranchNeonApi {
 	}
 }
 
+/** Third `listBranches` is the CLI GA warning after create+push already listed. */
+class WarningListFailsNeonApi extends CreateBranchNeonApi {
+	private listCalls = 0;
+
+	override async listBranches(
+		projectId: string,
+	): Promise<NeonBranchSnapshot[]> {
+		this.listCalls += 1;
+		if (this.listCalls >= 3) {
+			throw new Error("warning list failed");
+		}
+		return super.listBranches(projectId);
+	}
+}
+
+class PartialCreateThenWarningListFailsNeonApi extends CreateBranchThenRejectNeonApi {
+	private listCalls = 0;
+
+	override async listBranches(
+		projectId: string,
+	): Promise<NeonBranchSnapshot[]> {
+		this.listCalls += 1;
+		if (this.listCalls >= 3) {
+			throw new Error("warning list failed");
+		}
+		return super.listBranches(projectId);
+	}
+}
+
 /** Neon rejects a setting the create call carried, so no branch is created at all. */
 class RejectCreateNeonApi extends CreateBranchNeonApi {
 	override async createBranch(): Promise<{
@@ -1610,6 +1763,35 @@ describe("createBranchFromPolicyOnCheckout", () => {
 		// after creation. The id must come back to the caller (checkout pins it) rather than
 		// being lost with the thrown error.
 		const api = new CreateBranchThenRejectNeonApi();
+		writeFileSync(join(cwd, "neon.ts"), AUTH_POLICY);
+
+		const created = await createBranchFromPolicyOnCheckout({
+			projectId: PROJECT_ID,
+			branchName: NEW_BRANCH_NAME,
+			runtimeApi: api,
+			cwd,
+		});
+
+		expect(created?.branchId).toBe(NEW_BRANCH_ID);
+		expect(created?.policyFailure).toContain(AUTH_REJECTED);
+	});
+
+	it("keeps the created branch id when the GA warning list fails", async () => {
+		const api = new WarningListFailsNeonApi();
+		writeFileSync(join(cwd, "neon.ts"), NEW_BRANCH_POLICY);
+
+		const created = await createBranchFromPolicyOnCheckout({
+			projectId: PROJECT_ID,
+			branchName: NEW_BRANCH_NAME,
+			runtimeApi: api,
+			cwd,
+		});
+
+		expect(created).toEqual({ branchId: NEW_BRANCH_ID });
+	});
+
+	it("keeps the original policy failure when the GA warning list fails", async () => {
+		const api = new PartialCreateThenWarningListFailsNeonApi();
 		writeFileSync(join(cwd, "neon.ts"), AUTH_POLICY);
 
 		const created = await createBranchFromPolicyOnCheckout({
@@ -1765,5 +1947,41 @@ describe("createBranchFromPolicyOnCheckout", () => {
 				cnameTarget: "custom-domains.fake.neon.tech",
 			},
 		]);
+	});
+
+	it("warns for preview tuning gated on parentId during checkout create", async () => {
+		const api = new CreateBranchNeonApi();
+		const source = join(cwd, "hello.ts");
+		writeFileSync(
+			source,
+			"export default { fetch() { return new Response('ok'); } };\n",
+		);
+		writeFileSync(
+			join(cwd, "neon.ts"),
+			`export default { functions: { hello: { name: 'Hello', source: ${JSON.stringify(
+				source,
+			)} } }, branch: (branch) => branch.parentId ? { preview: { functions: { hello: { runtime: 'nodejs24' } } } } : {} };\n`,
+		);
+		const stderrChunks: string[] = [];
+		const origErr = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			stderrChunks.push(chunk.toString());
+			return origErr(chunk);
+		}) as typeof process.stderr.write;
+
+		try {
+			const created = await createBranchFromPolicyOnCheckout({
+				projectId: PROJECT_ID,
+				branchName: NEW_BRANCH_NAME,
+				runtimeApi: api,
+				cwd,
+			});
+			expect(created).toEqual({ branchId: NEW_BRANCH_ID });
+			expect(stderrChunks.join("")).toContain(
+				"branch.preview.functions → branch.functions",
+			);
+		} finally {
+			process.stderr.write = origErr;
+		}
 	});
 });
