@@ -2,13 +2,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
 	analyticsUserId,
+	commandSuccessProperties,
 	getAnalyticsEventProperties,
 	getErrorAnalyticsEventProperties,
+	recordCommandSuccessExtras,
+	recordScaffoldedTemplate,
 	storedCredentialAttribution,
+	takeCommandSuccessExtras,
 	telemetryCredential,
 } from "./analytics.js";
 
 afterEach(() => {
+	takeCommandSuccessExtras();
 	vi.unstubAllEnvs();
 });
 
@@ -247,6 +252,72 @@ describe("getAnalyticsEventProperties", () => {
 				_: ["branches", "list"],
 			}).agent,
 		).toBe("claude-code");
+	});
+});
+
+describe("command success extras", () => {
+	it("starts empty", () => {
+		expect(takeCommandSuccessExtras()).toEqual({});
+	});
+
+	it("merges separate patches", () => {
+		recordScaffoldedTemplate("hono");
+		recordCommandSuccessExtras({
+			agent_setup: "plugin",
+			init_kind: "empty-template",
+		});
+		expect(takeCommandSuccessExtras()).toEqual({
+			template: "hono",
+			agent_setup: "plugin",
+			init_kind: "empty-template",
+		});
+	});
+
+	it("lets a later patch replace the same key", () => {
+		recordCommandSuccessExtras({ agent_setup: "plugin" });
+		recordCommandSuccessExtras({ agent_setup: "skip" });
+		expect(takeCommandSuccessExtras()).toEqual({ agent_setup: "skip" });
+	});
+
+	it("clears every property after take", () => {
+		recordScaffoldedTemplate("hono");
+		recordCommandSuccessExtras({
+			agent_setup: "skills-mcp",
+			init_kind: "empty-skip",
+			scope: "global",
+		});
+		takeCommandSuccessExtras();
+		expect(takeCommandSuccessExtras()).toEqual({});
+	});
+
+	it("keeps the template helper as a merge, not a replace", () => {
+		recordCommandSuccessExtras({ agent_setup: "plugin" });
+		recordScaffoldedTemplate("hono");
+		expect(takeCommandSuccessExtras()).toEqual({
+			agent_setup: "plugin",
+			template: "hono",
+		});
+	});
+
+	it("builds the success event from recorded extras", () => {
+		recordCommandSuccessExtras({
+			template: "hono",
+			agent_setup: "plugin",
+			init_kind: "empty-template",
+		});
+		expect(
+			commandSuccessProperties({
+				_: ["init"],
+				projectId: "proj-1",
+			}),
+		).toMatchObject({
+			command: "init",
+			projectId: "proj-1",
+			template: "hono",
+			agent_setup: "plugin",
+			init_kind: "empty-template",
+		});
+		expect(takeCommandSuccessExtras()).toEqual({});
 	});
 });
 

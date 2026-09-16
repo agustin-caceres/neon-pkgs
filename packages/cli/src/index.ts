@@ -3,9 +3,10 @@ import { hideBin } from "yargs/helpers";
 import {
 	analyticsMiddleware,
 	closeAnalytics,
-	getAnalyticsEventProperties,
+	commandSuccessProperties,
 	initAnalyticsClientMiddleware,
 	sendError,
+	takeCommandSuccessExtras,
 	trackEvent,
 } from "./analytics.js";
 import { isNeonApiError, messageFromBody, type NeonApiClient } from "./api.js";
@@ -310,14 +311,7 @@ void (async () => {
 			const args = await builder.argv;
 
 			// Send analytics for a successful attempt
-			trackEvent("cli_command_success", {
-				...getAnalyticsEventProperties(args),
-				projectId: args.projectId,
-				branchId: args.branchId,
-				accountId: args.accountId,
-				authMethod: args.authMethod,
-				authData: args.authData,
-			});
+			trackEvent("cli_command_success", commandSuccessProperties(args));
 			if (args._.length === 0 || args.help) {
 				await showHelp(builder);
 				process.exit(0);
@@ -326,6 +320,7 @@ void (async () => {
 			await closeAnalytics();
 			break;
 		} catch (err) {
+			takeCommandSuccessExtras();
 			attempts++;
 			const shouldRetry = await handleError(
 				"",

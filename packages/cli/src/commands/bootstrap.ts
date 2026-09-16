@@ -3,6 +3,10 @@ import { join, relative, resolve } from "node:path";
 import { credentialInputs } from "@neon-internals/cli-core/auth_selection";
 import prompts, { type InitialReturnValue } from "prompts";
 import type yargs from "yargs";
+import {
+	recordCommandSuccessExtras,
+	recordScaffoldedTemplate,
+} from "../analytics.js";
 import { isCi } from "../env.js";
 import {
 	type BootstrapTemplate,
@@ -277,8 +281,17 @@ export const handler = async (
 	const targetDir = await resolveTargetDir(props, interactive, template);
 	ensureTargetUsable(targetDir, props.force);
 	await scaffold(template, targetDir);
+	recordScaffoldedTemplate(template.id);
 	printScaffolded(template, targetDir);
-	return runPostScaffoldSteps(props, targetDir, interactive, template, named);
+	const result = await runPostScaffoldSteps(
+		props,
+		targetDir,
+		interactive,
+		template,
+		named,
+	);
+	recordCommandSuccessExtras({ agent_setup: result.agentSetup });
+	return result;
 };
 
 /**

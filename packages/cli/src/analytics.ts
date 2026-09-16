@@ -345,6 +345,58 @@ export const trackEvent = (
 	log.debug("Sent CLI event: %s", event);
 };
 
+/**
+ * CLI Started runs before interactive pickers. Resolved template, agent-setup,
+ * init path, and install scope ride on cli_command_success via this
+ * process-local slot. Yargs never sees those choices.
+ */
+export type CommandAgentSetup = "plugin" | "skills-mcp" | "skip";
+export type CommandInitKind = "empty-template" | "empty-skip" | "existing";
+export type CommandInstallScope = "project" | "global";
+
+export type CommandSuccessExtras = {
+	template?: string;
+	agent_setup?: CommandAgentSetup;
+	init_kind?: CommandInitKind;
+	scope?: CommandInstallScope;
+};
+
+let commandSuccessExtras: CommandSuccessExtras = {};
+
+export const recordCommandSuccessExtras = (
+	patch: CommandSuccessExtras,
+): void => {
+	commandSuccessExtras = { ...commandSuccessExtras, ...patch };
+};
+
+export const recordScaffoldedTemplate = (templateId: string): void => {
+	recordCommandSuccessExtras({ template: templateId });
+};
+
+export const takeCommandSuccessExtras = (): CommandSuccessExtras => {
+	const extras = commandSuccessExtras;
+	commandSuccessExtras = {};
+	return extras;
+};
+
+export const commandSuccessProperties = (
+	args: AnalyticsEventArgs & {
+		projectId?: string;
+		branchId?: string;
+		accountId?: string;
+		authMethod?: string;
+		authData?: string;
+	},
+) => ({
+	...getAnalyticsEventProperties(args),
+	projectId: args.projectId,
+	branchId: args.branchId,
+	accountId: args.accountId,
+	authMethod: args.authMethod,
+	authData: args.authData,
+	...takeCommandSuccessExtras(),
+});
+
 const analyticsCommand = (args: AnalyticsEventArgs): string => {
 	const command = args._.join(" ");
 	const raw =
