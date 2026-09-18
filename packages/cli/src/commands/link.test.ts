@@ -117,6 +117,20 @@ const test = originalTest.extend<{
 	},
 });
 
+const expectSessionRetryFlags = (
+	stderr: string,
+	ctx: string,
+	output?: "json" | "yaml",
+) => {
+	expect(stderr).toContain(`--context-file ${ctx}`);
+	expect(stderr).toContain("--no-env-pull");
+	if (output) {
+		expect(stderr).toContain(`--output ${output}`);
+	} else {
+		expect(stderr).not.toContain("--output table");
+	}
+};
+
 const expectNonInteractiveHelp = (text: string) => {
 	const uniqueCommands = [
 		"neon orgs list --output json",
@@ -133,7 +147,7 @@ const expectNonInteractiveHelp = (text: string) => {
 
 describe("link", () => {
 	describe("non-interactive flag mode", () => {
-		test("link to existing project writes org+project, deferring the branch to checkout", async ({
+		test("link --project-id -y on a personal project omits orgId and pins the default branch", async ({
 			testCliCommand,
 			readFile,
 			tmpContext,
@@ -141,10 +155,9 @@ describe("link", () => {
 			const ctx = tmpContext("flag_existing");
 			await testCliCommand([
 				"link",
-				"--org-id",
-				"org-2",
 				"--project-id",
 				"test",
+				"-y",
 				"--no-env-pull",
 				"--context-file",
 				ctx,
@@ -162,6 +175,7 @@ describe("link", () => {
 				"link",
 				"--project-id",
 				"proj-in-org",
+				"-y",
 				"--no-env-pull",
 				"--context-file",
 				ctx,
@@ -204,34 +218,16 @@ describe("link", () => {
 			expect(readFile(ctx)).toMatchSnapshot();
 		});
 
-		test("link --project-id with no branches warns and does not pin", async ({
+		test("link --project-id with no branches fails without writing .neon", async ({
 			testCliCommand,
-			readFile,
 			tmpContext,
 		}) => {
 			const ctx = tmpContext("flag_no_branches");
-			await testCliCommand([
-				"link",
-				"--project-id",
-				"proj-no-branches",
-				"--no-env-pull",
-				"--context-file",
-				ctx,
-			]);
-			expect(readFile(ctx)).toMatchSnapshot();
-		});
-
-		test("link --project-id -y with no default branch fails without writing .neon", async ({
-			testCliCommand,
-			tmpContext,
-		}) => {
-			const ctx = tmpContext("flag_no_default");
 			await testCliCommand(
 				[
 					"link",
 					"--project-id",
-					"proj-no-default",
-					"-y",
+					"proj-no-branches",
 					"--no-env-pull",
 					"--context-file",
 					ctx,
@@ -240,11 +236,271 @@ describe("link", () => {
 					code: 1,
 					snapshot: false,
 					stderr: expect.stringContaining(
-						"Project 'proj-no-default' has no default branch. Pass --branch <name> to pin one.",
+						"Project 'proj-no-branches' has no branches to link",
 					),
 				},
 			);
 			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("link --project-id -y with no default branch lists branches for --branch", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_no_default");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"proj-no-default",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "json",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(JSON.parse(stdout)).toEqual([
+				{ id: "br-alpha-branch-123456", name: "alpha" },
+				{ id: "br-beta-branch-123456", name: "beta" },
+			]);
+			expect(stderr).toContain(
+				"Project 'proj-no-default' has no default branch",
+			);
+			expect(stderr).toContain(
+				"neon link -y --project-id proj-no-default --branch <name-or-id>",
+			);
+			expectSessionRetryFlags(stderr, ctx, "json");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("link -y --org-id --project-id with no default keeps --org-id in recovery", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_no_default_org");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--org-id",
+					"org-7",
+					"--project-id",
+					"proj-no-default",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "json",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(JSON.parse(stdout)).toEqual([
+				{ id: "br-alpha-branch-123456", name: "alpha" },
+				{ id: "br-beta-branch-123456", name: "beta" },
+			]);
+			expect(stderr).toContain(
+				"neon link -y --org-id org-7 --project-id proj-no-default --branch <name-or-id>",
+			);
+			expectSessionRetryFlags(stderr, ctx, "json");
+			expect(stderr).not.toContain("neon checkout");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("branch recovery keeps --config-dir", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const configDir = join(TEST_TMP, "flag_session_auth");
+			mkdirSync(configDir, { recursive: true });
+			const ctx = tmpContext("flag_session_config_dir");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"proj-no-default",
+					"--config-dir",
+					configDir,
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "json",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(JSON.parse(stdout)).toEqual([
+				{ id: "br-alpha-branch-123456", name: "alpha" },
+				{ id: "br-beta-branch-123456", name: "beta" },
+			]);
+			expect(stderr).toContain(
+				"neon link -y --project-id proj-no-default --branch <name-or-id>",
+			);
+			expect(stderr).toContain(`--config-dir ${configDir}`);
+			expectSessionRetryFlags(stderr, ctx, "json");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("branch recovery keeps --profile with --config-dir through the CLI", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const configDir = join(TEST_TMP, "flag_session_profile");
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(
+				join(configDir, "credentials.review-ci.json"),
+				JSON.stringify({
+					type: "api_key",
+					api_key: "test-key",
+					user_id: "user-key",
+				}),
+				{ mode: 0o600 },
+			);
+			writeFileSync(
+				join(configDir, "profiles.json"),
+				JSON.stringify({
+					version: 1,
+					profiles: {
+						DEFAULT: { credentials: "credentials.json" },
+						"review-ci": {
+							credentials: "credentials.review-ci.json",
+						},
+					},
+				}),
+			);
+			const ctx = tmpContext("flag_session_profile");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"proj-no-default",
+					"--profile",
+					"review-ci",
+					"--config-dir",
+					configDir,
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					apiKey: false,
+					output: "json",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(JSON.parse(stdout)).toEqual([
+				{ id: "br-alpha-branch-123456", name: "alpha" },
+				{ id: "br-beta-branch-123456", name: "beta" },
+			]);
+			expect(stderr).toContain(
+				"neon link -y --project-id proj-no-default --branch <name-or-id>",
+			);
+			expect(stderr).toContain(`--config-dir ${configDir}`);
+			expect(stderr).toContain("--profile review-ci");
+			expectSessionRetryFlags(stderr, ctx, "json");
+			expect(stderr).not.toContain("--api-key");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("link -y --project-id with no default prints yaml branch candidates", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_no_default_yaml");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"proj-no-default",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "yaml",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(stdout).toContain("id: br-alpha-branch-123456");
+			expect(stdout).toContain("name: alpha");
+			expect(stdout).toContain("id: br-beta-branch-123456");
+			expect(stdout).toContain("name: beta");
+			expect(stderr).toContain(
+				"neon link -y --project-id proj-no-default --branch <name-or-id>",
+			);
+			expectSessionRetryFlags(stderr, ctx, "yaml");
+		});
+
+		test("link -y --project-id with no default prints a branch table", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_no_default_table");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"proj-no-default",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "table",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(stdout).toContain("Branches");
+			expect(stdout).toContain("br-alpha-branch-123456");
+			expect(stdout).toContain("alpha");
+			expect(stdout).toContain("br-beta-branch-123456");
+			expect(stdout).toContain("beta");
+			expect(stderr).toContain(
+				"neon link -y --project-id proj-no-default --branch <name-or-id>",
+			);
+			expectSessionRetryFlags(stderr, ctx);
+		});
+
+		test("link -y --project-id --branch pins a listed non-default branch", async ({
+			testCliCommand,
+			readFile,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_no_default_pin");
+			await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"proj-no-default",
+					"--branch",
+					"alpha",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{ snapshot: false },
+			);
+			expect(JSON.parse(readFile(ctx))).toEqual({
+				orgId: "org-7",
+				projectId: "proj-no-default",
+				branch: "alpha",
+			});
 		});
 
 		test("re-linking the same project with -y keeps the already-pinned branch", async ({
@@ -326,7 +582,8 @@ describe("link", () => {
 			await testCliCommand([
 				"link",
 				"--params",
-				JSON.stringify({ orgId: "org-2", projectId: "test" }),
+				JSON.stringify({ projectId: "test" }),
+				"-y",
 				"--no-env-pull",
 				"--context-file",
 				ctx,
@@ -334,20 +591,144 @@ describe("link", () => {
 			expect(readFile(ctx)).toMatchSnapshot();
 		});
 
-		test("link --org-id alone records the default org", async ({
+		test("link --org-id without a project fails and names --project-id or -y", async ({
 			testCliCommand,
-			readFile,
 			tmpContext,
 		}) => {
 			const ctx = tmpContext("flag_org_only");
-			await testCliCommand([
-				"link",
-				"--org-id",
-				"org-2",
-				"--context-file",
+			const { stderr } = await testCliCommand(
+				["link", "--org-id", "org-2", "--context-file", ctx],
+				{ code: 1, snapshot: false },
+			);
+			expect(stderr).toContain("No project selected");
+			expect(stderr).toContain("neon link -y --org-id org-2");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("link --org-id --branch without a project fails the same way", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_org_branch_only");
+			const { stderr } = await testCliCommand(
+				[
+					"link",
+					"--org-id",
+					"org-2",
+					"--branch",
+					"main",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{ code: 1, snapshot: false },
+			);
+			expect(stderr).toContain("No project selected");
+			expect(stderr).toContain(
+				"neon link -y --org-id org-2 --branch main",
+			);
+			expect(stderr).toContain(
+				"neon link --org-id org-2 --project-id <project-id> --branch main",
+			);
+			expectSessionRetryFlags(stderr, ctx);
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("link --project-id with several branches lists them for --branch or -y", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_several_branches");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"--project-id",
+					"test",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{ output: "json", code: 1, snapshot: false },
+			);
+			const listed = JSON.parse(stdout) as unknown;
+			expect(listed).toEqual(
+				expect.arrayContaining([
+					{ id: "br-main-branch-123456", name: "main" },
+					{ id: "br-sunny-branch-123456", name: "test_branch" },
+				]),
+			);
+			expect(stderr).toContain("has multiple branches");
+			expect(stderr).toContain(
+				"neon link -y --project-id test --branch <name-or-id>",
+			);
+			expect(stderr).not.toContain("neon checkout");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("stale same-project pin fails without rewriting .neon", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_stale_pin");
+			writeFileSync(
 				ctx,
-			]);
-			expect(readFile(ctx)).toMatchSnapshot();
+				JSON.stringify({
+					projectId: "test",
+					branch: "gone",
+				}),
+			);
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"--project-id",
+					"test",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{ output: "json", code: 1, snapshot: false },
+			);
+			expect(stderr).toContain(
+				"Branch 'gone' not found in project 'test'",
+			);
+			expect(stderr).toContain(
+				"neon link -y --project-id test --branch <name-or-id>",
+			);
+			expect(stderr).not.toContain("neon checkout");
+			expect(JSON.parse(stdout)).toEqual(
+				expect.arrayContaining([
+					{ id: "br-main-branch-123456", name: "main" },
+				]),
+			);
+			expect(JSON.parse(readFileSync(ctx, "utf-8"))).toEqual({
+				projectId: "test",
+				branch: "gone",
+			});
+		});
+
+		test("--org-id on a personal project fails rather than attaching the org", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("flag_personal_org");
+			const { stderr } = await testCliCommand(
+				[
+					"link",
+					"--org-id",
+					"org-2",
+					"--project-id",
+					"test",
+					"-y",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{ code: 1, snapshot: false },
+			);
+			expect(stderr).toContain(
+				"does not report an organization matching --org-id org-2",
+			);
+			expect(existsSync(ctx)).toBe(false);
 		});
 
 		test("link --clear empties the context file", async ({
@@ -501,28 +882,203 @@ describe("link", () => {
 			);
 		});
 
-		test("unknown --branch-id fails listing the available branches", async ({
+		test("unknown --branch-id lists branches and retries link with --project-id", async ({
 			testCliCommand,
 			tmpContext,
 		}) => {
+			const ctx = tmpContext("verify_no_branch");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"test",
+					"--branch",
+					"missing",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "json",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			const listed = JSON.parse(stdout) as unknown;
+			expect(listed).toEqual(
+				expect.arrayContaining([
+					{ id: "br-main-branch-123456", name: "main" },
+					{ id: "br-sunny-branch-123456", name: "test_branch" },
+				]),
+			);
+			expect(stderr).toContain(
+				"Branch 'missing' not found in project 'test'",
+			);
+			expect(stderr).toContain(
+				"neon link -y --project-id test --branch <name-or-id>",
+			);
+			expectSessionRetryFlags(stderr, ctx, "json");
+			expect(stderr).not.toContain("neon checkout");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("unknown --branch that looks like an id lists candidates", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("verify_no_branch_id");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"test",
+					"--branch",
+					"br-ghost-branch-000000",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "json",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(JSON.parse(stdout)).toEqual(
+				expect.arrayContaining([
+					{ id: "br-main-branch-123456", name: "main" },
+					{ id: "br-sunny-branch-123456", name: "test_branch" },
+				]),
+			);
+			expect(stderr).toContain(
+				"Branch 'br-ghost-branch-000000' not found in project 'test'",
+			);
+			expect(stderr).toContain(
+				"neon link -y --project-id test --branch <name-or-id>",
+			);
+			expectSessionRetryFlags(stderr, ctx, "json");
+			expect(stderr).not.toContain("neon checkout");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("unknown --branch lists yaml candidates", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("verify_no_branch_yaml");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--project-id",
+					"test",
+					"--branch",
+					"missing",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "yaml",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(stdout).toContain("id: br-main-branch-123456");
+			expect(stdout).toContain("name: main");
+			expect(stdout).toContain("id: br-sunny-branch-123456");
+			expect(stdout).toContain("name: test_branch");
+			expect(stderr).toContain(
+				"neon link -y --project-id test --branch <name-or-id>",
+			);
+			expectSessionRetryFlags(stderr, ctx, "yaml");
+			expect(stderr).not.toContain("neon checkout");
+		});
+
+		test("unknown --branch keeps --org-id in the recovery command", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("verify_no_branch_org");
+			const { stdout, stderr } = await testCliCommand(
+				[
+					"link",
+					"-y",
+					"--org-id",
+					"org-7",
+					"--project-id",
+					"proj-in-org",
+					"--branch",
+					"missing",
+					"--no-env-pull",
+					"--context-file",
+					ctx,
+				],
+				{
+					output: "json",
+					code: 1,
+					snapshot: false,
+				},
+			);
+			expect(JSON.parse(stdout)).toEqual([
+				{ id: "br-dev-branch-123456", name: "dev" },
+				{ id: "br-main-branch-654321", name: "main" },
+			]);
+			expect(stderr).toContain(
+				"neon link -y --org-id org-7 --project-id proj-in-org --branch <name-or-id>",
+			);
+			expectSessionRetryFlags(stderr, ctx, "json");
+			expect(stderr).not.toContain("neon checkout");
+			expect(existsSync(ctx)).toBe(false);
+		});
+
+		test("branch names on later list pages still resolve", async ({
+			testCliCommand,
+			readFile,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("verify_paged_branch");
+			await testCliCommand([
+				"link",
+				"--project-id",
+				"proj-paged-branches",
+				"--branch",
+				"page-two",
+				"--no-env-pull",
+				"--context-file",
+				ctx,
+			]);
+			expect(JSON.parse(readFile(ctx))).toEqual({
+				orgId: "org-7",
+				projectId: "proj-paged-branches",
+				branch: "page-two",
+			});
+		});
+
+		test("persists the id when the branch name looks like a branch id", async ({
+			testCliCommand,
+			readFile,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("verify_br_named");
 			await testCliCommand(
 				[
 					"link",
 					"--project-id",
-					"test",
-					"--branch-id",
-					"br-ghost-99999999",
+					"proj-br-named",
 					"--no-env-pull",
 					"--context-file",
-					tmpContext("verify_no_branch"),
+					ctx,
 				],
-				{
-					code: 1,
-					stderr: expect.stringContaining(
-						"Branch 'br-ghost-99999999' not found in project 'test'.",
-					),
-				},
+				{ snapshot: false },
 			);
+			expect(JSON.parse(readFile(ctx))).toEqual({
+				orgId: "org-7",
+				projectId: "proj-br-named",
+				branch: "br-actual-branch-654321",
+			});
 		});
 	});
 
@@ -583,17 +1139,21 @@ describe("link", () => {
 			expect(readFile(ctx)).toMatchSnapshot();
 		});
 
-		test("records --org-id when org listing is forbidden and no projects exist", async ({
+		test("org-scoped --org-id without a project fails instead of writing org-only context", async ({
 			testCliCommand,
-			readFile,
 			tmpContext,
 		}) => {
 			const ctx = tmpContext("orgkey_empty_org");
-			await testCliCommand(
+			const { stderr } = await testCliCommand(
 				["link", "--org-id", "org-from-console", "--context-file", ctx],
-				{ mockDir: "org-key-empty" },
+				{ mockDir: "org-key-empty", code: 1, snapshot: false },
 			);
-			expect(readFile(ctx)).toMatchSnapshot();
+			expect(stderr).toContain("No project selected");
+			expect(stderr).toContain("neon link -y --org-id org-from-console");
+			expect(stderr).toContain(
+				"neon link --org-id org-from-console --project-id <project-id>",
+			);
+			expect(existsSync(ctx)).toBe(false);
 		});
 	});
 
@@ -743,7 +1303,9 @@ describe("link", () => {
 			expect(stderr).toContain(
 				"Multiple projects are available in organization 'org-beta'",
 			);
-			expect(stderr).toContain("neon link -y --project-id <project-id>");
+			expect(stderr).toContain(
+				"neon link -y --org-id org-beta --project-id <project-id>",
+			);
 			expect(existsSync(ctx)).toBe(false);
 		});
 
@@ -777,7 +1339,7 @@ describe("link", () => {
 				{ id: "project-worker", name: "Worker" },
 			]);
 			expect(listed.stderr).toContain(
-				"neon link -y --project-id <project-id> --branch dev",
+				"neon link -y --org-id org-beta --project-id <project-id> --branch dev",
 			);
 			expect(existsSync(ctx)).toBe(false);
 
@@ -987,19 +1549,21 @@ describe("link", () => {
 			expect(existsSync(ctx)).toBe(false);
 		});
 
-		test("link --org-id without -y still records the org only", async ({
+		test("link --org-id without -y fails instead of writing org-only context", async ({
 			testCliCommand,
-			readFile,
 			tmpContext,
 		}) => {
 			const ctx = tmpContext("org_only_no_yes");
-			await testCliCommand(
+			const { stderr } = await testCliCommand(
 				["link", "--org-id", "org-alpha", "--context-file", ctx],
-				{ mockDir: "link-yes-empty", snapshot: false },
+				{ mockDir: "link-yes-empty", code: 1, snapshot: false },
 			);
-			expect(JSON.parse(readFile(ctx))).toEqual({
-				orgId: "org-alpha",
-			});
+			expect(stderr).toContain("No project selected");
+			expect(stderr).toContain("neon link -y --org-id org-alpha");
+			expect(stderr).toContain(
+				"neon link --org-id org-alpha --project-id <project-id>",
+			);
+			expect(existsSync(ctx)).toBe(false);
 		});
 
 		test("--params org id with -y discovers the project", async ({
@@ -1373,7 +1937,7 @@ describe("link", () => {
 	});
 
 	describe("--no-checks (offline write)", () => {
-		test("writes org+project with no API verification", async ({
+		test("writes org+project+branch with no API verification", async ({
 			testCliCommand,
 			readFile,
 			tmpContext,
@@ -1386,6 +1950,8 @@ describe("link", () => {
 				"org-anything",
 				"--project-id",
 				"ghost-project",
+				"--branch",
+				"main",
 				"--context-file",
 				ctx,
 			]);
@@ -1413,6 +1979,30 @@ describe("link", () => {
 			expect(readFile(ctx)).toMatchSnapshot();
 		});
 
+		test("fails when branch is missing", async ({
+			testCliCommand,
+			tmpContext,
+		}) => {
+			const ctx = tmpContext("nochecks_no_branch");
+			await testCliCommand(
+				[
+					"link",
+					"--no-checks",
+					"--org-id",
+					"org-anything",
+					"--project-id",
+					"ghost-project",
+					"--context-file",
+					ctx,
+				],
+				{
+					code: 1,
+					stderr: "ERROR: --no-checks requires --org-id, --project-id, and --branch because identifiers cannot be resolved offline.",
+				},
+			);
+			expect(existsSync(ctx)).toBe(false);
+		});
+
 		test("fails when org-id or project-id is missing", async ({
 			testCliCommand,
 			tmpContext,
@@ -1428,7 +2018,7 @@ describe("link", () => {
 				],
 				{
 					code: 1,
-					stderr: "ERROR: --no-checks writes the context with no API calls, so it needs both --org-id and --project-id (--branch is optional).",
+					stderr: "ERROR: --no-checks requires --org-id, --project-id, and --branch because identifiers cannot be resolved offline.",
 				},
 			);
 		});
@@ -1446,10 +2036,9 @@ describe("link", () => {
 		);
 		await testCliCommand([
 			"link",
-			"--org-id",
-			"org-2",
 			"--project-id",
 			"test",
+			"-y",
 			"--no-env-pull",
 			"--context-file",
 			ctx,
@@ -1465,10 +2054,9 @@ describe("link", () => {
 			const ctx = tmpContext("gi_creates");
 			await testCliCommand([
 				"link",
-				"--org-id",
-				"org-2",
 				"--project-id",
 				"test",
+				"-y",
 				"--no-env-pull",
 				"--context-file",
 				ctx,
@@ -1486,10 +2074,9 @@ describe("link", () => {
 			writeFileSync(giPath, "node_modules\ndist\n");
 			await testCliCommand([
 				"link",
-				"--org-id",
-				"org-2",
 				"--project-id",
 				"test",
+				"-y",
 				"--no-env-pull",
 				"--context-file",
 				ctx,
@@ -1501,8 +2088,6 @@ describe("link", () => {
 			// Re-link in the same dir must not produce a duplicate entry.
 			await testCliCommand([
 				"link",
-				"--org-id",
-				"org-2",
 				"--project-id",
 				"test",
 				"--no-env-pull",

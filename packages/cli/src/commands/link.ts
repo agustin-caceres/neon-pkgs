@@ -8,7 +8,7 @@ import type {
 import prompts, { type InitialReturnValue } from "prompts";
 import type yargs from "yargs";
 import { isNeonApiError, messageFromBody } from "../api.js";
-
+import { defaultDir } from "../config.js";
 import {
 	applyContext,
 	type Context,
@@ -25,6 +25,8 @@ import {
 	pickBranchInteractively,
 } from "../utils/branch_picker.js";
 import { getCliName } from "../utils/cli_name.js";
+import { listAllProjectBranches } from "../utils/enrichers.js";
+import { looksLikeBranchId } from "../utils/formats.js";
 import { helpEpilogue } from "../utils/help_text.js";
 import { writer } from "../writer.js";
 import { hasNeonConfigFile, initCmd } from "./config.js";
@@ -48,6 +50,8 @@ export type LinkProps = CommonProps & {
 	envPull: boolean;
 	config?: boolean;
 	cwd?: string;
+	profile?: string;
+	configDir?: string;
 };
 
 type Inputs = {
@@ -133,8 +137,7 @@ export const builder = (argv: yargs.Argv) =>
 				describe:
 					"Verify the org/project/branch exist (and resolve the org from the project) before " +
 					"writing. On by default; use --no-checks to write the context offline with no API " +
-					"calls — it then requires --org-id and --project-id (--branch optional) and skips " +
-					"env pull.",
+					"calls — it then requires --org-id, --project-id, and --branch, and skips env pull.",
 				type: "boolean",
 				default: true,
 			},
@@ -160,7 +163,7 @@ export const builder = (argv: yargs.Argv) =>
 			],
 			[
 				"$0 link --project-id polished-snowflake-12345678",
-				"Link an existing project (org is inferred). Pins the only branch; several prompt in a TTY",
+				"Link an existing project (org is inferred). Pins the only branch; several prompt in a TTY, or -y pins the default",
 			],
 			[
 				"$0 link --project-id polished-snowflake-12345678 -y",
@@ -175,7 +178,7 @@ export const builder = (argv: yargs.Argv) =>
 				"Pin a branch in the already-linked project",
 			],
 			[
-				"$0 link --no-checks --org-id org-… --project-id polished-snowflake-12345678",
+				"$0 link --no-checks --org-id org-… --project-id polished-snowflake-12345678 --branch main",
 				"Write the context offline (no API calls, no verification)",
 			],
 			[
@@ -210,15 +213,10 @@ export const runLink = async (props: LinkProps) => {
 	const existing = readContextFile(props.contextFile);
 
 	if (props.yes && hasIncompleteCreationInputs(inputs)) {
-		throw incompleteCreationError(inputs);
+		throw incompleteCreationError(props, inputs);
 	}
 
-	// `-y` must resolve a project. Org-only writes stay on `link --org-id`
-	// without `-y`.
-	if (
-		canResolveNonInteractively(inputs, existing) &&
-		!(props.yes && isOrgOnlyInput(inputs))
-	) {
+	if (canResolveNonInteractively(inputs, existing)) {
 		await runNonInteractive(props, inputs, existing);
 		return;
 	}
@@ -230,6 +228,9 @@ export const runLink = async (props: LinkProps) => {
 	}
 
 	if (!canPromptInteractively()) {
+		if (missingProjectForOrg(inputs)) {
+			throw orgNeedsProjectError(props, inputs);
+		}
 		throw new LinkInputError(
 			[
 				"Missing inputs and no interactive terminal for prompts.",
@@ -309,11 +310,30 @@ const validateInputs = (inputs: Inputs): void => {
 const hasIncompleteCreationInputs = (inputs: Inputs): boolean =>
 	Boolean(inputs.projectName) !== Boolean(inputs.regionId);
 
-const isOrgOnlyInput = (inputs: Inputs): boolean =>
-	Boolean(inputs.orgId) &&
-	!inputs.projectId &&
-	!inputs.projectName &&
-	!inputs.branch;
+const missingProjectForOrg = (inputs: Inputs): boolean =>
+	Boolean(inputs.orgId) && !inputs.projectId && !inputs.projectName;
+
+const orgNeedsProjectError = (
+	props: LinkProps,
+	inputs: Inputs,
+): LinkInputError => {
+	const orgId = inputs.orgId ?? "<org-id>";
+	const branchFlag = inputs.branch
+		? ` --branch ${quoteFlagValue(inputs.branch)}`
+		: "";
+	const session = sessionRetryFlags(props);
+	return new LinkInputError(
+		[
+			"No project selected. Pass --project-id, or use -y to select the only project:",
+			`  ${getCliName()} link -y --org-id ${quoteFlagValue(orgId)}${branchFlag}${session}`,
+			`  ${getCliName()} link --org-id ${quoteFlagValue(orgId)} --project-id <project-id>${
+				inputs.branch
+					? ` --branch ${quoteFlagValue(inputs.branch)}`
+					: " --branch <name-or-id>"
+			}${session}`,
+		].join("\n"),
+	);
+};
 
 const quoteFlagValue = (value: string): string => {
 	if (/^[A-Za-z0-9_./:@-]+$/.test(value)) {
@@ -322,7 +342,30 @@ const quoteFlagValue = (value: string): string => {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 };
 
-const incompleteCreationError = (inputs: Inputs): LinkInputError => {
+const sessionRetryFlags = (props: LinkProps): string => {
+	const flags: string[] = [];
+	if (props.contextFile) {
+		flags.push(`--context-file ${quoteFlagValue(props.contextFile)}`);
+	}
+	if (props.configDir && props.configDir !== defaultDir) {
+		flags.push(`--config-dir ${quoteFlagValue(props.configDir)}`);
+	}
+	if (props.output !== "table") {
+		flags.push(`--output ${props.output}`);
+	}
+	if (!props.envPull) {
+		flags.push("--no-env-pull");
+	}
+	if (props.profile) {
+		flags.push(`--profile ${quoteFlagValue(props.profile)}`);
+	}
+	return flags.length > 0 ? ` ${flags.join(" ")}` : "";
+};
+
+const incompleteCreationError = (
+	props: LinkProps,
+	inputs: Inputs,
+): LinkInputError => {
 	const orgFlag = inputs.orgId
 		? `--org-id ${quoteFlagValue(inputs.orgId)}`
 		: "--org-id <org-id>";
@@ -332,7 +375,7 @@ const incompleteCreationError = (inputs: Inputs): LinkInputError => {
 	const regionFlag = inputs.regionId
 		? `--region-id ${quoteFlagValue(inputs.regionId)}`
 		: "--region-id aws-us-east-2";
-	const example = `${getCliName()} link -y ${orgFlag} ${nameFlag} ${regionFlag}`;
+	const example = `${getCliName()} link -y ${orgFlag} ${nameFlag} ${regionFlag}${sessionRetryFlags(props)}`;
 	if (inputs.projectName) {
 		return new LinkInputError(
 			`--project-name requires --region-id. Example:\n  ${example}`,
@@ -354,7 +397,6 @@ const canResolveNonInteractively = (
 	if (inputs.projectId) return true;
 	if (inputs.orgId && inputs.projectName && inputs.regionId) return true;
 	if (inputs.branch && existing.projectId) return true;
-	if (inputs.orgId && !inputs.projectName && !inputs.branch) return true;
 	return false;
 };
 
@@ -372,10 +414,9 @@ const clearContext = (contextFile: string): void => {
 /**
  * `--no-checks`: write the context offline. Makes no API calls — so no org
  * inference, no existence/access verification, and no env pull — which means
- * the caller must supply both `--org-id` and `--project-id` (the org can't be
- * inferred without the network). `--branch` stays optional. This is the CLI
- * surface over {@link setContext}, useful for scripted/offline setups and for
- * re-creating a `.neon` from values you already trust.
+ * the caller must supply `--org-id`, `--project-id`, and `--branch`. This is
+ * the CLI surface over {@link setContext}, useful for scripted/offline setups
+ * and for re-creating a `.neon` from values you already trust.
  */
 const runWithoutChecks = (props: LinkProps): void => {
 	const inputs = parseInputs(props);
@@ -385,9 +426,9 @@ const runWithoutChecks = (props: LinkProps): void => {
 			"--no-checks can't create a project (that needs API access). Pass --org-id and --project-id for an existing project, or drop --no-checks.",
 		);
 	}
-	if (!inputs.orgId || !inputs.projectId) {
+	if (!inputs.orgId || !inputs.projectId || !inputs.branch) {
 		throw new Error(
-			"--no-checks writes the context with no API calls, so it needs both --org-id and --project-id (--branch is optional).",
+			"--no-checks requires --org-id, --project-id, and --branch because identifiers cannot be resolved offline.",
 		);
 	}
 	setContext(props.contextFile, {
@@ -467,44 +508,72 @@ const verifyOrgAccess = async (
 	}
 };
 
+const failWithBranchCandidates = (
+	props: LinkProps,
+	projectId: string,
+	branches: Branch[],
+	reason: string,
+): never => {
+	writer(props).end(
+		branches.map((b) => ({
+			id: b.id,
+			name: b.name ?? b.id,
+		})),
+		{
+			fields: ["id", "name"] as const,
+			title: "Branches",
+		},
+	);
+	const orgFlag = props.orgId
+		? ` --org-id ${quoteFlagValue(props.orgId)}`
+		: "";
+	throw new LinkInputError(
+		`${reason}\n  ${getCliName()} link -y${orgFlag} --project-id ${quoteFlagValue(projectId)} --branch <name-or-id>${sessionRetryFlags(props)}`,
+	);
+};
+
+const listAllBranches = async (
+	props: CommonProps,
+	projectId: string,
+): Promise<Branch[]> => listAllProjectBranches(props.apiClient, projectId);
+
 /**
  * Resolve a branch reference (name *or* id) to the matching branch, while
  * confirming it actually exists in the project. Unlike the shared
  * `branchIdResolve`, this also verifies references that already look like ids
- * (so a typo'd `br-…` doesn't silently get written), and surfaces the available
- * branches when nothing matches so the user can correct it (or run `checkout`).
+ * (so a typo'd `br-…` doesn't silently get written).
  */
 const resolveBranchRef = async (
-	props: CommonProps,
+	props: LinkProps,
 	projectId: string,
 	branchRef: string,
 ): Promise<Branch> => {
-	const { data } = await props.apiClient.listProjectBranches({ projectId });
+	const branches = await listAllBranches(props, projectId);
 	const match =
-		data.branches.find((b: Branch) => b.id === branchRef) ??
-		data.branches.find((b: Branch) => b.name === branchRef);
+		branches.find((b: Branch) => b.id === branchRef) ??
+		branches.find((b: Branch) => b.name === branchRef);
 	if (match) {
 		return match;
 	}
-	const available =
-		data.branches.length > 0
-			? data.branches
-					.map(
-						(b: Branch) => `${b.id}${b.name ? ` (${b.name})` : ""}`,
-					)
-					.join(", ")
-			: "(none)";
-	throw new LinkInputError(
-		`Branch '${branchRef}' not found in project '${projectId}'. Available branches: ${available}. Pin one with \`${getCliName()} checkout <branch>\`.`,
+	return failWithBranchCandidates(
+		props,
+		projectId,
+		branches,
+		`Branch '${branchRef}' not found in project '${projectId}'. Pass --branch with a name or ID from the list:`,
 	);
 };
 
 /**
- * The value to persist for a branch: prefer its human-readable **name** (nicer
- * to read in `.neon`, and still resolvable by every command), falling back to
- * the id when the branch has no name.
+ * Persist the name when later commands will look it up as a name. A name that
+ * already looks like a branch id is trusted as an id without listing, so keep
+ * the real id in that case.
  */
-const branchPersistValue = (branch: Branch): string => branch.name ?? branch.id;
+const branchPersistValue = (branch: { id: string; name?: string }): string => {
+	if (branch.name && !looksLikeBranchId(branch.name)) {
+		return branch.name;
+	}
+	return branch.id;
+};
 
 /**
  * Verify the project (and the org, when supplied) and resolve the org id to
@@ -512,16 +581,14 @@ const branchPersistValue = (branch: Branch): string => branch.name ?? branch.id;
  *
  * The project is always fetched, which both validates it and yields its
  * `org_id`. When `--org-id` is passed too: if the project reports an org it must
- * match (else a clear mismatch error); if it reports none, the supplied org is
- * verified on its own. Without `--org-id` the project's own org is used, falling
- * back to the org already recorded for the *same* project in `.neon`. Projects
- * on a personal account have no org, so `undefined` is a valid result — the
- * field is simply omitted.
+ * match (else a clear mismatch error); if it reports none, fail rather than
+ * attaching an unrelated org. Without `--org-id` the project's own org is used.
+ * Projects on a personal account have no org, so `undefined` is a valid result —
+ * the field is simply omitted.
  */
 const resolveOrgForProject = async (
 	props: CommonProps,
 	inputs: Inputs,
-	existing: Context,
 	projectId: string,
 ): Promise<string | undefined> => {
 	const project = await fetchProjectOrThrow(props, projectId);
@@ -534,7 +601,9 @@ const resolveOrgForProject = async (
 			);
 		}
 		if (!projectOrg) {
-			await verifyOrgAccess(props, inputs.orgId);
+			throw new LinkInputError(
+				`Project '${projectId}' does not report an organization matching --org-id ${inputs.orgId}. Omit --org-id to link using the project's own context.`,
+			);
 		}
 		return inputs.orgId;
 	}
@@ -542,20 +611,15 @@ const resolveOrgForProject = async (
 	if (projectOrg) {
 		return projectOrg;
 	}
-	if (projectId === existing.projectId && existing.orgId) {
-		return existing.orgId;
-	}
 	return undefined;
 };
 
 type BranchResolution = {
-	branch?: string;
-	empty: boolean;
+	branch: string;
 };
 
 /**
- * Keep an existing pin when re-linking the same project so `-y` does not reset
- * a checkout.
+ * Keep a same-project pin only after it still resolves on the project.
  */
 const resolvePinnedBranch = async (
 	props: LinkProps,
@@ -565,12 +629,13 @@ const resolvePinnedBranch = async (
 ): Promise<BranchResolution> => {
 	if (inputs.branch) {
 		const branch = await resolveBranchRef(props, projectId, inputs.branch);
-		return { branch: branchPersistValue(branch), empty: false };
+		return { branch: branchPersistValue(branch) };
 	}
 	if (projectId === existing.projectId) {
 		const pinned = contextBranch(existing);
 		if (pinned) {
-			return { branch: pinned, empty: false };
+			const branch = await resolveBranchRef(props, projectId, pinned);
+			return { branch: branchPersistValue(branch) };
 		}
 	}
 	return resolveBranchFromList(props, projectId);
@@ -580,33 +645,39 @@ const resolveBranchFromList = async (
 	props: LinkProps,
 	projectId: string,
 ): Promise<BranchResolution> => {
-	const { data } = await props.apiClient.listProjectBranches({ projectId });
-	const branches = data.branches;
+	const branches = await listAllBranches(props, projectId);
 	if (branches.length === 0) {
-		return { empty: true };
+		throw new LinkInputError(
+			`Project '${projectId}' has no branches to link. Create or restore a branch before retrying, or select another project with --project-id.`,
+		);
 	}
 	if (branches.length === 1) {
 		const [only] = branches;
 		if (!only) {
-			return { empty: true };
+			throw new LinkInputError(
+				`Project '${projectId}' has no branches to link. Create or restore a branch before retrying, or select another project with --project-id.`,
+			);
 		}
-		return { branch: branchPersistValue(only), empty: false };
+		return { branch: branchPersistValue(only) };
 	}
 	if (props.yes) {
 		const def = branches.find((b: Branch) => b.default);
 		if (!def) {
-			throw new Error(
-				`Project '${projectId}' has no default branch. Pass --branch <name> to pin one.`,
+			return failWithBranchCandidates(
+				props,
+				projectId,
+				branches,
+				`Project '${projectId}' has no default branch. Pass --branch with a name or ID from the list:`,
 			);
 		}
-		return { branch: branchPersistValue(def), empty: false };
+		return { branch: branchPersistValue(def) };
 	}
 	if (canPromptInteractively()) {
 		const picked = await pickBranchInteractively(branches, {
 			message: "Which branch would you like to link?",
 			nonInteractiveMessage:
 				"No branch could be selected without an interactive terminal. " +
-				`Re-run \`${getCliName()} link\` interactively, or \`${getCliName()} checkout <branch>\` to pin one.`,
+				`Pass --branch <name-or-id>, or -y to pin the default branch.`,
 		});
 		if (picked.kind === "existing") {
 			const existing = branches.find(
@@ -616,13 +687,27 @@ const resolveBranchFromList = async (
 				branch: existing
 					? branchPersistValue(existing)
 					: picked.branchId,
-				empty: false,
 			};
 		}
-		await createBranch(props.apiClient, projectId, picked.name, branches);
-		return { branch: picked.name, empty: false };
+		const created = await createBranch(
+			props.apiClient,
+			projectId,
+			picked.name,
+			branches,
+		);
+		return {
+			branch: branchPersistValue({
+				id: created,
+				name: picked.name,
+			}),
+		};
 	}
-	return { empty: false };
+	return failWithBranchCandidates(
+		props,
+		projectId,
+		branches,
+		`Project '${projectId}' has multiple branches. Pass --branch <name-or-id>, or -y to pin its default branch.`,
+	);
 };
 
 // ----------------------------------------------------------------------------
@@ -665,7 +750,6 @@ const runNonInteractive = async (
 		const orgId = await resolveOrgForProject(
 			props,
 			inputs,
-			existing,
 			inputs.projectId,
 		);
 		const resolved = await resolvePinnedBranch(
@@ -685,7 +769,6 @@ const runNonInteractive = async (
 			projectId: inputs.projectId,
 			branch: resolved.branch,
 			created: false,
-			empty: resolved.empty,
 		});
 		return;
 	}
@@ -693,12 +776,7 @@ const runNonInteractive = async (
 	// Pin a branch in the already-linked project.
 	if (inputs.branch && existing.projectId) {
 		const projectId = existing.projectId;
-		const orgId = await resolveOrgForProject(
-			props,
-			inputs,
-			existing,
-			projectId,
-		);
+		const orgId = await resolveOrgForProject(props, inputs, projectId);
 		const resolved = await resolvePinnedBranch(
 			props,
 			inputs,
@@ -716,28 +794,11 @@ const runNonInteractive = async (
 			projectId,
 			branch: resolved.branch,
 			created: false,
-			empty: resolved.empty,
 		});
 		return;
 	}
 
-	// Record the default org, preserving any existing project/branch.
-	if (inputs.orgId) {
-		const orgId = inputs.orgId;
-		await verifyOrgAccess(props, orgId);
-		const projectId = existing.projectId;
-		const branch = projectId ? contextBranch(existing) : undefined;
-		applyContext(props.contextFile, { orgId, projectId, branch });
-		printSummary(props, {
-			contextFile: props.contextFile,
-			orgId,
-			projectId,
-			branch,
-			created: false,
-			orgOnly: true,
-		});
-		return;
-	}
+	throw orgNeedsProjectError(props, inputs);
 };
 
 // ----------------------------------------------------------------------------
@@ -772,6 +833,11 @@ const runInteractive = async (props: LinkProps, inputs: Inputs) => {
 	}
 
 	if (inputs.projectName && inputs.regionId) {
+		if (inputs.branch) {
+			throw new Error(
+				`Conflicting inputs: --branch pins a branch of an existing project, but --project-name creates a new one. Create the project first, then \`${getCliName()} checkout <branch>\`.`,
+			);
+		}
 		const created = await createProject(props, {
 			orgId,
 			name: inputs.projectName,
@@ -796,10 +862,18 @@ const runInteractive = async (props: LinkProps, inputs: Inputs) => {
 
 	// Need to ask: existing project or create a new one?
 	const projects = await listAllProjects(props, orgId);
-	const action = await promptProjectChoice(projects, inputs.projectName);
+	const action = await promptProjectChoice(projects, inputs.projectName, {
+		allowCreate: !inputs.branch,
+	});
 
 	if (action.type === "existing") {
-		const resolved = await resolveBranchFromList(props, action.projectId);
+		const existing = readContextFile(props.contextFile);
+		const resolved = await resolvePinnedBranch(
+			props,
+			inputs,
+			existing,
+			action.projectId,
+		);
 		applyContext(props.contextFile, {
 			orgId,
 			projectId: action.projectId,
@@ -813,9 +887,14 @@ const runInteractive = async (props: LinkProps, inputs: Inputs) => {
 			created: false,
 			projectName: action.name,
 			regionId: action.regionId,
-			empty: resolved.empty,
 		});
 		return;
+	}
+
+	if (inputs.branch) {
+		throw new Error(
+			`Conflicting inputs: --branch pins a branch of an existing project, but creating a project starts from its default branch. Link an existing project, or omit --branch and create first.`,
+		);
 	}
 
 	const projectName =
@@ -844,14 +923,16 @@ const runInteractive = async (props: LinkProps, inputs: Inputs) => {
 
 const confirmRelinkIfNeeded = async (props: LinkProps): Promise<boolean> => {
 	const existing = readContextFile(props.contextFile);
-	if (!existing.orgId || !existing.projectId) {
+	if (!existing.projectId) {
 		return true;
 	}
 	const { proceed } = await prompts({
 		onState: onPromptState,
 		type: "confirm",
 		name: "proceed",
-		message: `${props.contextFile} is already linked to project ${existing.projectId} (org ${existing.orgId}). Re-link?`,
+		message: existing.orgId
+			? `${props.contextFile} is already linked to project ${existing.projectId} (org ${existing.orgId}). Re-link?`
+			: `${props.contextFile} is already linked to project ${existing.projectId}. Re-link?`,
 		initial: true,
 	});
 	if (!proceed) {
@@ -899,24 +980,31 @@ type ProjectChoice =
 
 const promptProjectChoice = async (
 	projects: ProjectListItem[],
-	suggestedName?: string,
+	suggestedName: string | undefined,
+	opts: { allowCreate: boolean },
 ): Promise<ProjectChoice> => {
 	const choices = [
-		{ title: "＋ Create new project…", value: CREATE_NEW_SENTINEL },
+		...(opts.allowCreate
+			? [{ title: "＋ Create new project…", value: CREATE_NEW_SENTINEL }]
+			: []),
 		...projects.map((project) => ({
 			title: `${project.name} (${project.id})`,
 			value: project.id,
 		})),
 	];
-	// Create sits at the top, so default to the first existing project (index 1) when there
-	// is one; with no projects to show, the create option (index 0) is the only choice.
+	if (choices.length === 0) {
+		throw new LinkInputError(
+			"No projects are available to link. Omit --branch to create a project, or pass --project-id for an existing one.",
+		);
+	}
+	const createOffset = opts.allowCreate ? 1 : 0;
 	const { selection } = await prompts({
 		onState: onPromptState,
 		type: "select",
 		name: "selection",
 		message: "Which project would you like to link?",
 		choices,
-		initial: projects.length > 0 ? 1 : 0,
+		initial: projects.length > 0 ? createOffset : 0,
 	});
 	if (selection === CREATE_NEW_SENTINEL) {
 		return { type: "create", suggestedName };
@@ -1072,7 +1160,7 @@ type NamedCandidate = {
 
 const CANDIDATE_FIELDS = ["id", "name"] as const;
 
-const extraYesFlags = (inputs: Inputs): string => {
+const extraYesFlags = (props: LinkProps, inputs: Inputs): string => {
 	const flags: string[] = [];
 	if (inputs.projectName) {
 		flags.push(`--project-name ${quoteFlagValue(inputs.projectName)}`);
@@ -1083,13 +1171,21 @@ const extraYesFlags = (inputs: Inputs): string => {
 	if (inputs.branch) {
 		flags.push(`--branch ${quoteFlagValue(inputs.branch)}`);
 	}
-	return flags.length > 0 ? ` ${flags.join(" ")}` : "";
+	const named = flags.length > 0 ? ` ${flags.join(" ")}` : "";
+	return `${named}${sessionRetryFlags(props)}`;
 };
 
-const yesProjectIdCommand = (inputs: Inputs): string =>
-	`${getCliName()} link -y --project-id <project-id>${
-		inputs.branch ? ` --branch ${quoteFlagValue(inputs.branch)}` : ""
-	}`;
+const yesProjectIdCommand = (
+	props: LinkProps,
+	inputs: Inputs,
+	orgId = inputs.orgId,
+): string => {
+	const orgFlag = orgId ? ` --org-id ${quoteFlagValue(orgId)}` : "";
+	const branchFlag = inputs.branch
+		? ` --branch ${quoteFlagValue(inputs.branch)}`
+		: "";
+	return `${getCliName()} link -y${orgFlag} --project-id <project-id>${branchFlag}${sessionRetryFlags(props)}`;
+};
 
 const printNamedCandidates = (
 	props: LinkProps,
@@ -1130,7 +1226,7 @@ const resolveYesOrgId = async (
 		throw new LinkInputError(
 			[
 				"No organizations were returned for this account. Pass --project-id for a project you can access:",
-				`  ${yesProjectIdCommand(inputs)}`,
+				`  ${yesProjectIdCommand(props, inputs)}`,
 			].join("\n"),
 		);
 	}
@@ -1146,7 +1242,7 @@ const resolveYesOrgId = async (
 	throw new LinkInputError(
 		[
 			"Multiple organizations are available. Pass --org-id with an ID from the list:",
-			`  ${getCliName()} link -y --org-id <org-id>${extraYesFlags(inputs)}`,
+			`  ${getCliName()} link -y --org-id <org-id>${extraYesFlags(props, inputs)}`,
 		].join("\n"),
 	);
 };
@@ -1165,7 +1261,7 @@ const resolveYesInputs = async (
 			[
 				`No projects are available in organization '${orgId}'.`,
 				"To create and link a project, pass --project-name and --region-id:",
-				`  ${getCliName()} link -y --org-id ${quoteFlagValue(orgId)} --project-name <name> --region-id aws-us-east-2`,
+				`  ${getCliName()} link -y --org-id ${quoteFlagValue(orgId)} --project-name <name> --region-id aws-us-east-2${sessionRetryFlags(props)}`,
 			].join("\n"),
 		);
 	}
@@ -1181,7 +1277,7 @@ const resolveYesInputs = async (
 	throw new LinkInputError(
 		[
 			`Multiple projects are available in organization '${orgId}'. Pass --project-id with an ID from the list:`,
-			`  ${yesProjectIdCommand(inputs)}`,
+			`  ${yesProjectIdCommand(props, inputs, orgId)}`,
 		].join("\n"),
 	);
 };
@@ -1259,16 +1355,13 @@ const createProject = async (
 type HumanSummary = {
 	contextFile: string;
 	orgId?: string;
-	projectId?: string;
-	branch?: string;
+	projectId: string;
+	branch: string;
 	created: boolean;
 	projectName?: string;
 	regionId?: string;
-	/** True for the `--org-id`-only path: records the default org without nudging checkout. */
-	orgOnly?: boolean;
-	/** True for the `--no-checks` path: written offline, so suppress the checkout nudge. */
+	/** True for the `--no-checks` path: written offline, so suppress env pull. */
 	noChecks?: boolean;
-	empty?: boolean;
 };
 
 const printSummary = (_props: LinkProps, summary: HumanSummary): void => {
@@ -1278,49 +1371,32 @@ const printSummary = (_props: LinkProps, summary: HumanSummary): void => {
 			`Created project ${summary.projectId}${summary.projectName ? ` ("${summary.projectName}")` : ""}${summary.regionId ? ` in ${summary.regionId}` : ""}.`,
 		);
 	}
-	lines.push(
-		`${summary.orgOnly ? "Updated" : "Linked"} ${summary.contextFile}:`,
-	);
+	lines.push(`Linked ${summary.contextFile}:`);
 	if (summary.orgId) {
 		lines.push(`  orgId:     ${summary.orgId}`);
 	}
-	if (summary.projectId) {
-		lines.push(`  projectId: ${summary.projectId}`);
-	}
-	if (summary.branch) {
-		lines.push(`  branch:    ${summary.branch}`);
-	}
+	lines.push(`  projectId: ${summary.projectId}`);
+	lines.push(`  branch:    ${summary.branch}`);
 	if (summary.noChecks) {
 		lines.push("");
 		lines.push("Written offline (--no-checks): nothing was verified.");
-	} else if (summary.projectId && !summary.branch && !summary.orgOnly) {
-		lines.push("");
-		if (summary.empty) {
-			lines.push(
-				`This project has no branches, so none was pinned. Create a branch, then run \`${getCliName()} checkout <branch>\` to pin it and pull its env vars.`,
-			);
-		} else {
-			lines.push(
-				`No branch pinned. Run \`${getCliName()} checkout <branch>\` to pin a branch and pull its env vars.`,
-			);
-		}
 	}
 	lines.push("");
 	process.stdout.write(`${lines.join("\n")}\n`);
 };
 
 /**
- * Print the link summary, then run the bundled `env pull` so a human `link` that pinned a
- * branch ends with the branch's connection string already on disk. When no branch was pinned
- * there is nothing to pull, so env pull is skipped and the summary nudges `checkout` instead.
- * `--no-env-pull` opts out (env pull's own status / skip hint is logged to stderr).
+ * Print the link summary, then run the bundled `env pull` so a completed `link` ends with
+ * the pinned branch's connection string on disk. `--no-checks` skips the pull because
+ * nothing was verified. `--no-env-pull` opts out (env pull's own status / skip hint is
+ * logged to stderr).
  */
 const finalizeLink = async (
 	props: LinkProps,
 	summary: HumanSummary,
 ): Promise<void> => {
 	printSummary(props, summary);
-	if (!summary.branch || !summary.projectId) {
+	if (!summary.branch || !summary.projectId || summary.noChecks) {
 		return;
 	}
 	const { config: _offerConfig, ...rest } = props;
