@@ -10,12 +10,8 @@ import {
 	INIT_SUBTITLE,
 	type InitOutcomeKind,
 } from "./copy.js";
-import type {
-	InitFunnelAgentSetup,
-	InitFunnelConfig,
-	InitFunnelLink,
-} from "./funnel.js";
-import type { InitAgentSetup } from "./plan.js";
+import type { InitFunnelConfig, InitFunnelLink } from "./funnel.js";
+import type { InitAgentSetupResult, InitToolingPlan } from "./plan.js";
 
 export const NEON_GREEN = "#4BB578";
 
@@ -121,18 +117,24 @@ export const printInitDone = (text: string): void => {
 	process.stdout.write(`\n${painted.join("\n")}\n\n`);
 };
 
-export const agentSetupLabel = (setup: InitAgentSetup): string => {
+export const agentSetupLabel = (setup: InitAgentSetupResult): string => {
 	if (setup === "plugin") {
 		return "plugin";
 	}
 	if (setup === "skills-mcp") {
 		return "skills and MCP";
 	}
+	if (setup === "skills") {
+		return "skills";
+	}
+	if (setup === "mcp") {
+		return "MCP";
+	}
 	return "skipped";
 };
 
 export const agentSetupDoneLabel = (input: {
-	setup: InitAgentSetup;
+	setup: InitAgentSetupResult;
 	ran: boolean;
 }): string => {
 	if (!input.ran && input.setup !== "skip") {
@@ -144,26 +146,44 @@ export const agentSetupDoneLabel = (input: {
 const formatAgentIds = (agents: readonly AgentType[]): string =>
 	agents.join(", ");
 
+const SETUP_LABELS: { [K in InitToolingPlan["setup"]]: string } = {
+	skip: "skipped",
+	plugin: "Neon plugin",
+	skills: "skills",
+	"skills-mcp": "skills and MCP",
+	mixed: "plugin and skills/MCP",
+};
+
+/** Names the agents behind each mechanism, since init picks skills and MCP agents separately. */
 export const agentsRowValue = (input: {
-	setup: InitFunnelAgentSetup | null;
-	agents: readonly AgentType[];
+	tooling: InitToolingPlan;
+	installed: readonly AgentType[];
 }): string => {
-	if (input.setup === null || input.setup === "skip") {
-		return "skipped";
+	const { tooling } = input;
+	const parts: string[] = [];
+	const add = (label: string, ids: readonly AgentType[]): void => {
+		const ran = ids.filter((id) => input.installed.includes(id));
+		if (ran.length > 0) {
+			parts.push(`${label}: ${formatAgentIds(ran)}`);
+		}
+	};
+	if (tooling.setup === "plugin" || tooling.setup === "skills") {
+		add(SETUP_LABELS[tooling.setup], tooling.agents);
+	} else if (tooling.setup === "skills-mcp" || tooling.setup === "mixed") {
+		if (tooling.setup === "mixed") {
+			add("Neon plugin", tooling.pluginAgents);
+		}
+		const sameAgents =
+			tooling.skillsAgents.length === tooling.mcpAgents.length &&
+			tooling.skillsAgents.every((id) => tooling.mcpAgents.includes(id));
+		if (sameAgents) {
+			add("skills and MCP", tooling.skillsAgents);
+		} else {
+			add("skills", tooling.skillsAgents);
+			add("MCP", tooling.mcpAgents);
+		}
 	}
-	if (input.setup === "skills") {
-		return "default Neon skills in this directory";
-	}
-	const ids = formatAgentIds(input.agents);
-	if (input.setup === "plugin") {
-		return ids.length > 0 ? `Neon plugin: ${ids}` : "Neon plugin";
-	}
-	if (input.setup === "skills-mcp") {
-		return ids.length > 0 ? `skills and MCP: ${ids}` : "skills and MCP";
-	}
-	return ids.length > 0
-		? `plugin and skills/MCP: ${ids}`
-		: "plugin and skills/MCP";
+	return parts.length > 0 ? parts.join("; ") : SETUP_LABELS[tooling.setup];
 };
 
 export const projectRowValue = (link: InitFunnelLink | null): string => {

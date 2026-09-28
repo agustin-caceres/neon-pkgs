@@ -22,6 +22,7 @@ import {
 	YES_LINK_NEEDS_AUTH,
 } from "../init/copy.js";
 import type { InitAgentSetup } from "../init/plan.js";
+import type { AgentType } from "../mcp/agents.js";
 import { test as cliTest } from "../test_utils/fixtures.js";
 import { npmEnvForIsolatedHome } from "../test_utils/npm_env.js";
 import { builder } from "./init.js";
@@ -503,6 +504,7 @@ describe("init handler", () => {
 			project: true,
 			projectId: "proj-pin",
 		});
+		expect(stepKinds(ops)).toEqual(["skills", "mcp"]);
 	});
 
 	test("project MCP config rejects an unsupported agent", async () => {
@@ -617,6 +619,55 @@ describe("init handler", () => {
 		expect(ops.calls[0]?.options).toMatchObject({ skills: ["neon"] });
 		const mcp = ops.calls.find((call) => call.kind === "mcp");
 		expect(mcp?.options).toMatchObject({ oauth: true });
+	});
+
+	test("-y --mcp-auth with only an MCP-only agent detected skips fallback skills", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "neon-init-yes-mcp-only-"));
+		writeFileSync(join(cwd, "package.json"), "{}\n");
+		mkdirSync(join(cwd, "config"));
+		writeFileSync(join(cwd, "config", "mcporter.json"), "{}\n");
+		const ops = makeOperations();
+		const { handler } = await import("./init.js");
+
+		await handler(
+			baseProps({
+				cwd,
+				operations: ops,
+				yes: true,
+				mcpAuth: "oauth",
+				link: false,
+				config: false,
+				contextFile: join(cwd, ".neon"),
+			}),
+		);
+
+		expect(stepKinds(ops)).toEqual(["mcp"]);
+		const mcp = ops.calls.find((call) => call.kind === "mcp");
+		expect(mcp?.options.agent).toEqual(["mcporter"]);
+	});
+
+	test("-y --mcp-config-location project rejects a detected agent without project MCP", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "neon-init-yes-mcp-location-"));
+		writeFileSync(join(cwd, "package.json"), "{}\n");
+		const ops = makeOperations();
+		const { handler } = await import("./init.js");
+
+		await expect(
+			handler(
+				baseProps({
+					cwd,
+					operations: ops,
+					yes: true,
+					mcpConfigLocation: "project",
+					mcpAuth: "oauth",
+					detectInstalledAgents: async () => ["cline"],
+					link: false,
+					config: false,
+					contextFile: join(cwd, ".neon"),
+				}),
+			),
+		).rejects.toThrow("cline cannot install project-level MCP config");
+		expect(stepKinds(ops)).toEqual([]);
 	});
 
 	test("--no-agent-setup with --skill fails", async () => {
@@ -804,7 +855,12 @@ describe("init handler", () => {
 		).rejects.toThrow(namedAgentsUnavailable(["mcporter"]));
 	});
 
-	test("Custom skip plus --no-link plus declining neon.ts writes nothing", async () => {
+	test.each([
+		[[], "skip"],
+		[["skills"], "skills"],
+		[["mcp"], "mcp"],
+		[["skills", "mcp"], "skills-mcp"],
+	] as const)("Custom runs selected steps %j and continues", async (steps, result) => {
 		const cwd = mkdtempSync(join(tmpdir(), "neon-init-skip-all-"));
 		writeFileSync(join(cwd, "package.json"), "{}\n");
 		const ops = makeOperations();
@@ -820,18 +876,100 @@ describe("init handler", () => {
 				linkProject,
 				initConfig,
 				contextFile: join(cwd, ".neon"),
-				pickAgentSetup: async () => "skip",
+				pickAgentSetup: pickSkillsMcp,
+				pickAgents: async ({
+					setup,
+				}: {
+					setup: "plugin" | "skills" | "mcp";
+				}) =>
+					steps.some((step) => step === setup)
+						? ["opencode"]
+						: undefined,
+				mcpConfigLocation: "global",
+				mcpAuth: "oauth",
 				pickConfig: async () => false,
 			}),
 		);
 
-		expect(ops.calls).toEqual([]);
+		expect(stepKinds(ops)).toEqual(steps);
 		expect(linkProject).not.toHaveBeenCalled();
 		expect(initConfig).not.toHaveBeenCalled();
 		expect(takeCommandSuccessExtras()).toEqual({
 			init_kind: "existing",
-			agent_setup: "skip",
+			agent_setup: result,
 		});
+	});
+
+	test("Custom asks MCP location and auth only after MCP agents are picked", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "neon-init-mcp-order-"));
+		writeFileSync(join(cwd, "package.json"), "{}\n");
+		const asked: string[] = [];
+		const { handler } = await import("./init.js");
+		const run = (mcpAgents: AgentType[] | undefined) =>
+			handler(
+				baseProps({
+					cwd,
+					operations: makeOperations(),
+					link: false,
+					contextFile: join(cwd, ".neon"),
+					pickAgentSetup: pickSkillsMcp,
+					pickAgents: async ({
+						setup,
+					}: {
+						setup: "plugin" | "skills" | "mcp";
+					}) => {
+						asked.push(`agents:${setup}`);
+						return setup === "mcp" ? mcpAgents : ["opencode"];
+					},
+					pickSkills: async () => {
+						asked.push("skills");
+						return ["neon-postgres"];
+					},
+					pickMcpConfigLocation: async () => {
+						asked.push("location");
+						return "global";
+					},
+					pickMcpAuth: async () => {
+						asked.push("auth");
+						return "oauth";
+					},
+					pickConfig: async () => false,
+				}),
+			);
+
+		await run(["opencode"]);
+		expect(asked).toEqual([
+			"agents:skills",
+			"skills",
+			"agents:mcp",
+			"location",
+			"auth",
+		]);
+		asked.length = 0;
+		await run(undefined);
+		expect(asked).toEqual(["agents:skills", "skills", "agents:mcp"]);
+	});
+
+	test("skipping MCP discards its API-key requirement for claimable setup", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "neon-init-skip-mcp-"));
+		const ops = makeOperations();
+		const createClaimable = vi.fn().mockResolvedValue(undefined);
+		const { handler } = await import("./init.js");
+		await handler(
+			baseProps({
+				cwd,
+				contextFile: join(cwd, ".neon"),
+				operations: ops,
+				claimable: true,
+				config: false,
+				mcpAuth: "api-key",
+				mcpConfigLocation: "global",
+				pickAgents: async () => undefined,
+				createClaimable,
+			}),
+		);
+		expect(ops.calls).toEqual([]);
+		expect(createClaimable).toHaveBeenCalledOnce();
 	});
 
 	test("Custom unauthenticated can create a claimable project", async () => {

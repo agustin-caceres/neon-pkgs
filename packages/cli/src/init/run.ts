@@ -191,7 +191,8 @@ export type InitProps = CommonProps & {
 	pickAgents?: (input: {
 		available: readonly AgentType[];
 		detected: readonly AgentType[];
-	}) => Promise<AgentType[]>;
+		setup: "plugin" | "skills" | "mcp";
+	}) => Promise<AgentType[] | undefined>;
 	pickSkills?: () => Promise<string[]>;
 	pickMcpConfigLocation?: () => Promise<InitMcpConfigLocation>;
 	pickMcpAuth?: (input: {
@@ -289,26 +290,6 @@ const warnMissingPluginCommands = (
 	}
 };
 
-const availableForSetup = (
-	setup: InitAgentSetupChoice | "skills",
-	scope: "global" | "project",
-): AgentType[] => {
-	if (setup === "plugin") {
-		return pluginsInstallableAgents(scope);
-	}
-	if (setup === "skip") {
-		return [];
-	}
-	if (setup === "skills") {
-		return [...skillsInstallableAgents()];
-	}
-	const ids = new Set([
-		...skillsInstallableAgents(),
-		...mcpInstallableAgents(scope === "project" ? "project" : "global"),
-	]);
-	return [...ids];
-};
-
 const nonEmptyAgents = (
 	ids: readonly AgentType[],
 	fallback: boolean,
@@ -338,23 +319,28 @@ const skillsTooling = (
 };
 
 const skillsMcpTooling = (
-	ids: readonly AgentType[],
-	scope: "global" | "project",
+	skillsSelection: readonly AgentType[] | undefined,
+	mcpSelection: readonly AgentType[] | undefined,
+	mcpConfigLocation: InitMcpConfigLocation,
 	fallback: boolean,
 ): InitToolingPlan => {
-	const mcpConfigLocation = scope === "project" ? "project" : "global";
-	let selected = ids;
-	if (selected.length === 0 && fallback) {
-		selected = FALLBACK_SKILLS_AGENTS;
+	// The fallback is for "no agents detected at all". An MCP-only agent leaves the
+	// skills selection empty, and that must not pull in the fallback skills agents.
+	const useFallback =
+		fallback && skillsSelection?.length === 0 && mcpSelection?.length === 0;
+	const selectedSkills = (
+		useFallback ? FALLBACK_SKILLS_AGENTS : (skillsSelection ?? [])
+	).filter((id) => skillsInstallableAgents().includes(id));
+	const selectedMcp = (
+		useFallback ? FALLBACK_SKILLS_AGENTS : (mcpSelection ?? [])
+	).filter((id) => mcpInstallableAgents(mcpConfigLocation).includes(id));
+	if (selectedMcp.length === 0) {
+		return skillsTooling(selectedSkills, false);
 	}
 	return {
 		setup: "skills-mcp",
-		skillsAgents: selected.filter((id) =>
-			skillsInstallableAgents().includes(id),
-		),
-		mcpAgents: selected.filter((id) =>
-			mcpInstallableAgents(mcpConfigLocation).includes(id),
-		),
+		skillsAgents: selectedSkills,
+		mcpAgents: selectedMcp,
 	};
 };
 
@@ -380,7 +366,8 @@ const pickOrDetectAgents = async (input: {
 	detected: readonly AgentType[];
 	pickAgents?: InitProps["pickAgents"];
 	interactive: boolean;
-}): Promise<AgentType[]> => {
+	setup: "plugin" | "skills" | "mcp";
+}): Promise<AgentType[] | undefined> => {
 	if (input.named.length > 0) {
 		const selected = input.named.filter((id) =>
 			input.available.includes(id),
@@ -400,12 +387,14 @@ const pickOrDetectAgents = async (input: {
 		return input.pickAgents({
 			available: [...input.available],
 			detected,
+			setup: input.setup,
 		});
 	}
 	if (input.interactive) {
 		return pickInitAgentsInteractively({
 			available: [...input.available],
 			detected,
+			setup: input.setup,
 		});
 	}
 	return detected;
@@ -612,8 +601,6 @@ export const runInit = async (props: InitProps): Promise<void> => {
 		const pluginReady = (agents: readonly AgentType[]): AgentType[] =>
 			agents.filter((id) => !unavailablePluginAgents.includes(id));
 
-		let agentSetupChoice: InitAgentSetupChoice | "skills" | "mixed" =
-			"plugin";
 		let tooling: InitToolingPlan = { setup: "skip" };
 		let mcpAuth: InitMcpAuthChoice | undefined = props.mcpAuth;
 		let mcpConfigLocation: InitMcpConfigLocation =
@@ -642,7 +629,6 @@ export const runInit = async (props: InitProps): Promise<void> => {
 				printInitProgress(NO_AGENTS_FALLBACK_STATUS);
 			}
 			warnMissingPluginCommands(missingPluginCommands, tooling);
-			agentSetupChoice = funnelAgentSetup(tooling);
 			mcpAuth =
 				!detection.authenticated &&
 				(tooling.setup === "skills-mcp" || tooling.setup === "mixed")
@@ -660,7 +646,6 @@ export const runInit = async (props: InitProps): Promise<void> => {
 			});
 			if (inferred.kind === "skip") {
 				tooling = { setup: "skip" };
-				agentSetupChoice = "skip";
 			} else if (inferred.kind === "auto") {
 				const autoAgents =
 					named.length > 0 ? named : detection.detectedAgents;
@@ -679,7 +664,6 @@ export const runInit = async (props: InitProps): Promise<void> => {
 					tooling = recommendedTooling([]);
 					printInitProgress(NO_AGENTS_FALLBACK_STATUS);
 				}
-				agentSetupChoice = funnelAgentSetup(tooling);
 			} else {
 				const setup: InitAgentSetupChoice | "skills" =
 					inferred.kind === "ask"
@@ -688,33 +672,34 @@ export const runInit = async (props: InitProps): Promise<void> => {
 								pickAgentSetupInteractively
 							)()
 						: inferred.kind;
-				agentSetupChoice = setup === "skills" ? "skills" : setup;
 				if (setup !== "skip") {
 					pluginScope = pluginScopeFor(targets, "project");
-					const available =
-						setup === "plugin"
-							? uniqueAgents([
-									...pluginsInstallableAgents("project"),
-									...pluginsInstallableAgents("global"),
-								])
-							: availableForSetup(setup, pluginScope);
-					const selected = await pickOrDetectAgents({
-						named,
-						available,
-						detected: detection.detectedAgents,
-						interactive: detection.interactive,
-						...(props.pickAgents !== undefined
-							? { pickAgents: props.pickAgents }
-							: {}),
-					});
 					const namedFallback = named.length === 0;
-					if (setup === "plugin") {
-						pluginScope = pluginScopeFor(selected, pluginScope);
-						tooling = splitInitTooling(selected, pluginScope);
-						if (
-							tooling.setup !== "plugin" &&
-							tooling.setup !== "skip"
-						) {
+					const pickAgents = (
+						setup: "plugin" | "skills" | "mcp",
+						available: readonly AgentType[],
+					) =>
+						pickOrDetectAgents({
+							named,
+							available,
+							detected: detection.detectedAgents,
+							interactive: detection.interactive,
+							setup,
+							pickAgents: props.pickAgents,
+						});
+					if (setup === "plugin" || setup === "skills") {
+						const available =
+							setup === "plugin"
+								? uniqueAgents([
+										...pluginsInstallableAgents("project"),
+										...pluginsInstallableAgents("global"),
+									])
+								: [...skillsInstallableAgents()];
+						const selected = await pickAgents(setup, available);
+						if (selected === undefined) {
+							tooling = { setup: "skip" };
+						} else if (setup === "plugin") {
+							pluginScope = pluginScopeFor(selected, pluginScope);
 							tooling = splitInitTooling(
 								selected.filter((id) =>
 									pluginsInstallableAgents(
@@ -723,13 +708,19 @@ export const runInit = async (props: InitProps): Promise<void> => {
 								),
 								pluginScope,
 							);
+						} else {
+							tooling = skillsTooling(selected, namedFallback);
 						}
-						agentSetupChoice = funnelAgentSetup(tooling);
-					} else if (setup === "skills") {
-						tooling = skillsTooling(selected, namedFallback);
-						agentSetupChoice = funnelAgentSetup(tooling);
 					} else {
+						const skillsAvailable = skillsInstallableAgents();
+						const skillsSelection =
+							named.length > 0
+								? named.filter((id) =>
+										skillsAvailable.includes(id),
+									)
+								: await pickAgents("skills", skillsAvailable);
 						if (
+							skillsSelection !== undefined &&
 							selectedSkills === undefined &&
 							inferred.kind === "ask"
 						) {
@@ -740,62 +731,65 @@ export const runInit = async (props: InitProps): Promise<void> => {
 										? await pickInitSkillsInteractively()
 										: undefined;
 						}
-						mcpConfigLocation =
-							props.mcpConfigLocation ??
-							(yes
-								? "global"
-								: props.pickMcpConfigLocation !== undefined
-									? await props.pickMcpConfigLocation()
-									: detection.interactive
-										? await pickInitMcpConfigLocationInteractively()
-										: "global");
-						mcpAuth =
-							props.mcpAuth ??
-							(yes
-								? detection.authenticated &&
-									props.claimable !== true
-									? "api-key"
-									: "oauth"
-								: props.pickMcpAuth !== undefined
-									? await props.pickMcpAuth({
+						const mcpSelection =
+							named.length > 0
+								? named
+								: // Unfiltered by location so validateMcpConfigLocationSupport
+									// rejects or warns about agents the location cannot serve.
+									await pickAgents(
+										"mcp",
+										mcpInstallableAgents("global"),
+									);
+						if (mcpSelection !== undefined) {
+							mcpConfigLocation =
+								props.mcpConfigLocation ??
+								(yes
+									? "global"
+									: props.pickMcpConfigLocation !== undefined
+										? await props.pickMcpConfigLocation()
+										: detection.interactive
+											? await pickInitMcpConfigLocationInteractively()
+											: "global");
+							if (mcpSelection.length > 0) {
+								validateMcpConfigLocationSupport(
+									mcpSelection,
+									mcpConfigLocation,
+								);
+							}
+							const pickAuth =
+								props.pickMcpAuth ??
+								(detection.interactive
+									? pickInitMcpAuthInteractively
+									: undefined);
+							mcpAuth =
+								props.mcpAuth ??
+								(yes
+									? undefined
+									: await pickAuth?.({
 											authenticated:
 												detection.authenticated,
-										})
-									: detection.interactive
-										? await pickInitMcpAuthInteractively({
-												authenticated:
-													detection.authenticated,
-											})
-										: detection.authenticated &&
-												props.claimable !== true
-											? "api-key"
-											: "oauth");
-						validateMcpConfigLocationSupport(
-							selected,
-							mcpConfigLocation,
-						);
+										})) ??
+								(detection.authenticated &&
+								props.claimable !== true
+									? "api-key"
+									: "oauth");
+						}
 						tooling = skillsMcpTooling(
-							selected,
+							skillsSelection,
+							mcpSelection,
 							mcpConfigLocation,
 							namedFallback,
 						);
-						agentSetupChoice = "skills-mcp";
 					}
 				}
 			}
 		}
 
-		funnel.agentSetup =
-			agentSetupChoice === "plugin" ||
-			agentSetupChoice === "skills-mcp" ||
-			agentSetupChoice === "skills" ||
-			agentSetupChoice === "mixed" ||
-			agentSetupChoice === "skip"
-				? agentSetupChoice
-				: funnelAgentSetup(tooling);
+		funnel.agentSetup = funnelAgentSetup(tooling);
 
 		const usesMcp =
-			tooling.setup === "skills-mcp" || tooling.setup === "mixed";
+			(tooling.setup === "skills-mcp" || tooling.setup === "mixed") &&
+			tooling.mcpAgents.length > 0;
 		if (
 			mcpAuth === undefined &&
 			usesMcp &&
@@ -891,6 +885,7 @@ export const runInit = async (props: InitProps): Promise<void> => {
 		}
 
 		if (
+			usesMcp &&
 			mcpAuth === "api-key" &&
 			(projectSetup === "claimable" || props.claimable === true)
 		) {
@@ -1167,8 +1162,8 @@ export const runInit = async (props: InitProps): Promise<void> => {
 							{
 								label: "Agents",
 								value: agentsRowValue({
-									setup: funnel.agentSetup,
-									agents: funnel.agentsInstalled,
+									tooling,
+									installed: funnel.agentsInstalled,
 								}),
 							},
 							{
@@ -1258,8 +1253,8 @@ export const runInit = async (props: InitProps): Promise<void> => {
 					{
 						label: "Agents",
 						value: agentsRowValue({
-							setup: funnel.agentSetup,
-							agents: funnel.agentsInstalled,
+							tooling,
+							installed: funnel.agentsInstalled,
 						}),
 					},
 					{
