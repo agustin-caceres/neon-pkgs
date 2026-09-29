@@ -299,8 +299,7 @@ export const builder = (argv: yargs.Argv) =>
 									],
 								]),
 						(args) => scheduleSet(args as any),
-					)
-					.demandCommand(1, "Specify `get` or `set`."),
+					),
 			() => {},
 		);
 
