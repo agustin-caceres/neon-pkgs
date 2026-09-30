@@ -48,6 +48,9 @@ describe("Neon Live TanStack DB collection", () => {
 		expect(collection.get(2)).toMatchObject({ id: 2, title: "two" });
 
 		const matched = collection.utils.awaitTxId("42");
+		expect(client.latest().awaitedTransactions).toEqual([
+			{ txid: "42", timeout: undefined },
+		]);
 		client.latest().batch(
 			[
 				{
@@ -288,6 +291,15 @@ class TestClient<Row extends object> implements NeonLiveClient {
 }
 
 class TestRawSubscription<Row> implements RawLiveQuerySubscription<Row> {
+	private readonly appliedTxids = new Set<string>();
+	private readonly txWaiters = new Map<
+		string,
+		Set<{
+			resolve: () => void;
+			reject: (error: Error) => void;
+			timer?: ReturnType<typeof setTimeout>;
+		}>
+	>();
 	private readonly resetListeners = new Set<
 		(rows: readonly RawLiveQueryRow<Row>[]) => void
 	>();
@@ -301,6 +313,10 @@ class TestRawSubscription<Row> implements RawLiveQuerySubscription<Row> {
 		(state: LiveQueryState) => void
 	>();
 	readonly renewals: LiveQueryAuthorization<Row>[] = [];
+	readonly awaitedTransactions: Array<{
+		readonly txid: string;
+		readonly timeout: number | undefined;
+	}> = [];
 	unsubscribed = false;
 	private currentState: LiveQueryState = {
 		status: "connecting",
@@ -323,6 +339,31 @@ class TestRawSubscription<Row> implements RawLiveQuerySubscription<Row> {
 	onStateChange = (listener: (state: LiveQueryState) => void): (() => void) =>
 		add(this.stateListeners, listener);
 
+	awaitTxId = async (txid: string, timeout?: number): Promise<void> => {
+		this.awaitedTransactions.push({ txid, timeout });
+		if (this.appliedTxids.has(txid)) return;
+		return new Promise<void>((resolve, reject) => {
+			const waiter = {
+				resolve,
+				reject,
+				timer:
+					timeout === undefined
+						? undefined
+						: setTimeout(() => {
+								this.txWaiters.get(txid)?.delete(waiter);
+								reject(
+									new Error(
+										`Timed out waiting for Neon Live transaction ${txid}`,
+									),
+								);
+							}, timeout),
+			};
+			const waiters = this.txWaiters.get(txid) ?? new Set();
+			waiters.add(waiter);
+			this.txWaiters.set(txid, waiters);
+		});
+	};
+
 	renew = async (
 		authorization: LiveQueryAuthorization<Row>,
 	): Promise<void> => {
@@ -333,6 +374,13 @@ class TestRawSubscription<Row> implements RawLiveQuerySubscription<Row> {
 	unsubscribe = (): void => {
 		this.unsubscribed = true;
 		this.currentState = { status: "closed", error: undefined };
+		for (const waiters of this.txWaiters.values()) {
+			for (const waiter of waiters) {
+				if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+				waiter.reject(new Error("Neon Live subscription is closed"));
+			}
+		}
+		this.txWaiters.clear();
 	};
 
 	reset(rows: readonly RawLiveQueryRow<Row>[]): void {
@@ -347,6 +395,14 @@ class TestRawSubscription<Row> implements RawLiveQuerySubscription<Row> {
 	): void {
 		for (const listener of this.batchListeners) {
 			listener(changes, { txids });
+		}
+		for (const txid of txids) {
+			this.appliedTxids.add(txid);
+			for (const waiter of this.txWaiters.get(txid) ?? []) {
+				if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+				waiter.resolve();
+			}
+			this.txWaiters.delete(txid);
 		}
 	}
 

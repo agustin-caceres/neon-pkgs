@@ -6,11 +6,17 @@ import {
 	PostgresValueParserError,
 	validateColumns,
 } from "./postgres/value-decoder.js";
-import type { WireChange, WireColumn, WireRow } from "./protocol/messages.js";
+import type {
+	MvccSnapshot,
+	WireChange,
+	WireColumn,
+	WireRow,
+} from "./protocol/messages.js";
 import type {
 	ReconciledBatch,
 	ReconciliationTarget,
 } from "./reconciliation/reconciler.js";
+import { TransactionTracker } from "./transaction-tracker.js";
 import type {
 	LiveQueryBatchInfo,
 	LiveQueryChange,
@@ -73,6 +79,7 @@ export class Subscription<Row>
 	private readonly changeListeners = new Set<
 		(snapshot: LiveQuerySnapshot<Row>) => void
 	>();
+	private readonly transactions = new TransactionTracker();
 	closed = false;
 
 	constructor(
@@ -128,6 +135,9 @@ export class Subscription<Row>
 
 	onStateChange = (listener: (state: LiveQueryState) => void): (() => void) =>
 		listen(this.stateListeners, listener);
+
+	awaitTxId = (txid: string, timeout?: number): Promise<void> =>
+		this.transactions.wait(txid, timeout);
 
 	onChange = (
 		listener: (snapshot: LiveQuerySnapshot<Row>) => void,
@@ -219,7 +229,7 @@ export class Subscription<Row>
 		this.owner.parserFailed(this, error);
 	}
 
-	publishReset(): void {
+	publishReset(_wireRows: readonly WireRow[], mvcc: MvccSnapshot): void {
 		if (this.closed) return;
 		const staged = this.stagedReset;
 		if (!staged)
@@ -232,6 +242,7 @@ export class Subscription<Row>
 		this.stagedReset = undefined;
 		this.initialized = true;
 		this.snapshot = this.makeSnapshot();
+		this.transactions.applySnapshot(mvcc);
 		notify(this.resetListeners, staged.rows);
 	}
 
@@ -248,6 +259,7 @@ export class Subscription<Row>
 		if (this.materialized && this.state.status === "live") {
 			notify(this.changeListeners, this.snapshot);
 		}
+		for (const txid of batch.txids) this.transactions.seen(txid);
 	}
 
 	caughtUp(): void {
@@ -287,6 +299,7 @@ export class Subscription<Row>
 	markClosed(): void {
 		if (this.closed) return;
 		this.closed = true;
+		this.transactions.close();
 		this.setLifecycle(
 			Object.freeze({ status: "closed", error: undefined }),
 		);
