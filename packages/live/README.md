@@ -1,6 +1,6 @@
 # @neon/live
 
-Experimental typed SDK for authorizing Neon Live queries on an application
+Experimental typed SDK for sealing Neon Live queries on an application
 backend and consuming them from browser applications. The backend turns a
 parameterized query into a short-lived encrypted bearer capability. The
 browser presents that capability over a multiplexed WebSocket and receives an
@@ -15,7 +15,7 @@ authoritative result followed by atomic change batches.
 npm install @neon/live
 ```
 
-> **Requirements:** Node.js >= 20.19 for backend authorization. You also need a
+> **Requirements:** Node.js >= 20.19 for backend sealing. You also need a
 > PostgreSQL database connected to a compatible Neon Live proxy, a server-only
 > Neon Live secret, and the proxy WebSocket URL.
 
@@ -29,14 +29,14 @@ import { createNeonLive } from "@neon/live/server";
 
 | Entry point | Purpose |
 | --- | --- |
-| `@neon/live/server` | Authorize raw SQL or adapter-native queries on an application backend. |
+| `@neon/live/server` | Seal raw SQL or adapter-native queries on an application backend. |
 | `@neon/live/client` | Subscribe from a browser and consume materialized or raw changes. |
 | `@neon/live` | Convenience export of both surfaces; prefer the dedicated entry points in application code. |
 
-## Authorize a query on the backend
+## Seal a query on the backend
 
 An authenticated application endpoint constructs the exact query its caller
-may observe and returns the resulting authorization:
+may observe and returns the resulting sealed query:
 
 ```ts
 import { createNeonLive, rawSql } from "@neon/live/server";
@@ -59,11 +59,12 @@ app.post("/api/messages/live", async (request, response) => {
     [channelId],
   );
 
-  response.json(await neonLive.authorize({ query }));
+  const sealedQuery = await neonLive.seal({ query });
+  response.json(sealedQuery);
 });
 ```
 
-`authorize()` performs local Web Crypto work and makes no network request. The
+`seal()` performs local Web Crypto work and makes no network request. The
 application remains responsible for authentication, input validation, access
 checks, and putting every trusted caller-specific restriction into the query.
 Anyone holding the returned capability can subscribe to that exact query until
@@ -144,7 +145,7 @@ with backoff. If the subscription expires, recovery creates a new
 wire subscription behind the same public object and returns to `live` after its
 fresh authoritative reset.
 
-This mode holds the Neon Live secret and can authorize arbitrary queries. Use
+This mode holds the Neon Live secret and can seal arbitrary queries. Use
 it only in trusted runtimes, never in browser code. The runtime must provide a
 standards-compatible global `WebSocket` implementation.
 `createNeonLive({ url, parsers })` accepts the same OID overrides as the
@@ -152,20 +153,20 @@ low-level client for trusted direct-subscription results.
 
 ## Subscribe in the browser
 
-Fetch the authorization from the application backend and pass it to one shared
+Fetch the sealed query from the application backend and pass it to one shared
 client:
 
 ```ts
 import { createNeonLiveClient } from "@neon/live/client";
 
 const response = await fetch("/api/messages/live", { method: "POST" });
-if (!response.ok) throw new Error("Could not authorize messages");
+if (!response.ok) throw new Error("Could not start live messages");
 
-const authorization = await response.json();
+const sealedQuery = await response.json();
 const client = createNeonLiveClient({
   url: "wss://live.neon.tech/...",
 });
-const subscription = client.subscribe(authorization);
+const subscription = client.subscribe(sealedQuery);
 
 const stop = subscription.onChange(({ data, status, error }) => {
   if (error) showError(error);
@@ -180,7 +181,7 @@ client.close();
 
 The client opens one WebSocket lazily and multiplexes subscriptions. Lifecycle
 states are `connecting`, `live`, `stale`, `error`, and `closed`. During
-reconnection or authorization renewal, existing materialized data remains
+reconnection or sealed-query renewal, existing materialized data remains
 available as `stale`. Recoverable connection failures retry with capped
 jittered backoff until the connection recovers or the client is closed.
 
@@ -244,7 +245,7 @@ the WebSocket continue. The error identifies the result column and OID, omits
 the value, and preserves the parser's original error as `cause`.
 
 Parser configuration is runtime-only; it does not rewrite the `Row` type in a
-`LiveQueryAuthorization<Row>`. Keep adapter-inferred or explicitly declared
+`SealedLiveQuery<Row>`. Keep adapter-inferred or explicitly declared
 row types consistent with the selected parser preset and overrides.
 
 Applications obtain a replacement capability through the same backend endpoint
@@ -280,7 +281,7 @@ The default subscription materializes query rows. Integrations that own their
 state can consume raw resets and atomic batches instead:
 
 ```ts
-const raw = client.subscribe(authorization, { materialize: false });
+const raw = client.subscribe(sealedQuery, { materialize: false });
 
 raw.onReset((rows) => replaceAll(rows));
 raw.onBatch((changes, { txids }) => {
@@ -308,9 +309,9 @@ concerns.
   `useLiveQuery()`.
 - [`@neon/live-tanstack`](../live-tanstack) synchronizes a query into a TanStack
   DB collection.
-- [`@neon/live-drizzle`](../live-drizzle) authorizes typed Drizzle PostgreSQL
+- [`@neon/live-drizzle`](../live-drizzle) prepares typed Drizzle PostgreSQL
   selects.
 
-Treat authorizations as bearer credentials: deliver them over HTTPS and keep
+Treat sealed queries as bearer credentials: deliver them over HTTPS and keep
 them out of URLs, logs, and persistent browser storage. Never expose
 `NEON_LIVE_SECRET` to browser code.

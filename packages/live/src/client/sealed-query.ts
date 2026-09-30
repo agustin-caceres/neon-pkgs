@@ -1,12 +1,12 @@
 /**
- * JSON-compatible authorization for one exact live query.
+ * JSON-compatible sealed representation of one exact live query.
  *
- * The authorization is a short-lived bearer credential. Transport it over
+ * The query is a short-lived bearer credential. Transport it over
  * HTTPS and do not put it in URLs, logs, or persistent browser storage.
  *
- * @typeParam Row - Row produced by the authorized query.
+ * @typeParam Row - Row produced by the sealed query.
  */
-export interface LiveQueryAuthorization<Row> {
+export interface SealedLiveQuery<Row> {
 	/** Opaque encrypted bearer capability. */
 	readonly capability: string;
 	/** Stable identity used to prevent accidentally renewing a different query. */
@@ -17,19 +17,17 @@ export interface LiveQueryAuthorization<Row> {
 	readonly __row?: Row;
 }
 
-export function validateAuthorization<Row>(
-	authorization: LiveQueryAuthorization<Row>,
-): void {
+export function validateSealedQuery<Row>(query: SealedLiveQuery<Row>): void {
 	if (
-		!authorization ||
-		typeof authorization.capability !== "string" ||
-		!validCompactJweHeader(authorization.capability) ||
-		typeof authorization.queryFingerprint !== "string" ||
-		!/^[0-9a-f]{64}$/.test(authorization.queryFingerprint) ||
-		!Number.isSafeInteger(authorization.expiresAt) ||
-		authorization.expiresAt <= 0
+		!query ||
+		typeof query.capability !== "string" ||
+		!validCompactJweHeader(query.capability) ||
+		typeof query.queryFingerprint !== "string" ||
+		!/^[0-9a-f]{64}$/.test(query.queryFingerprint) ||
+		!Number.isSafeInteger(query.expiresAt) ||
+		query.expiresAt <= 0
 	) {
-		throw new Error("Invalid Neon Live authorization");
+		throw new Error("Invalid Neon Live sealed query");
 	}
 }
 

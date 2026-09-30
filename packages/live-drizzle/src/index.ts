@@ -1,5 +1,5 @@
 /**
- * Prepare Drizzle PostgreSQL select queries for Neon Live authorization.
+ * Define Neon Live queries from Drizzle PostgreSQL select builders.
  *
  * @module Drizzle
  */

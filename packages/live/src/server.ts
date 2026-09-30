@@ -1,22 +1,22 @@
 /**
- * Authorize application-defined PostgreSQL queries as Neon Live capabilities.
+ * Seal application-defined PostgreSQL queries as Neon Live capabilities.
  *
  * @module Backend
  */
 
 export { encodeTextParameter } from "./server/adapter.js";
 export type {
-	LiveQueryAuthorization,
 	NeonLiveAdapter,
 	NeonLiveDirectServer,
 	NeonLiveDirectServerOptions,
 	NeonLiveServer,
 	NeonLiveServerOptions,
 	PostgresParameterHelpers,
-	PreparedAuthorizationQuery,
+	PreparedLiveQuery,
 	PreparedLiveQueryParameter,
 	RawSqlParameter,
 	RawSqlQuery,
+	SealedLiveQuery,
 	TypedRawSqlParameter,
 } from "./server/neon-live.js";
 export {
